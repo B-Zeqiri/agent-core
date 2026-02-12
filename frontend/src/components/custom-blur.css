@@ -1,0 +1,15 @@
+/* Custom blur fallback for modal backdrop */
+.custom-blur-backdrop {
+  backdrop-filter: blur(32px) !important;
+  -webkit-backdrop-filter: blur(32px) !important;
+  position: relative;
+
+.custom-blur-backdrop::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 0;
+  pointer-events: none;
+}
+}

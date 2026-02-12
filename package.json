@@ -1,0 +1,48 @@
+{
+  "name": "agent-core",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "ts-node src/server.ts",
+    "test": "npm run test:kernel && npm run test:memory && npm run test:models && npm run test:tools && npm run test:scheduler && npm run test:ipc && npm run test:ipc:integration && npm run test:observability && npm run test:ui && npm run test:security && npm run test:orchestration && npm run test:agents && npm run test:examples",
+    "test:kernel": "ts-node src/kernel/test.ts",
+    "test:memory": "ts-node src/memory/test.ts",
+    "test:models": "ts-node src/models/test.ts && ts-node src/models/modelAdapter.test.ts",
+    "test:tools": "ts-node src/tools/test.ts",
+    "test:scheduler": "ts-node src/scheduler/test.ts",
+    "test:ipc": "ts-node src/ipc/test.ts",
+    "test:ipc:integration": "ts-node src/ipc/integration.test.ts",
+    "test:observability": "ts-node src/observability/test.ts",
+    "test:ui": "ts-node src/ui/test.ts",
+    "test:security": "ts-node src/security/test.ts",
+    "test:orchestration": "ts-node src/orchestration/test.ts",
+    "test:agents": "ts-node src/agents/test.ts",
+    "test:examples": "ts-node src/examples/test.ts",
+    "test:plugins": "ts-node src/plugins/test.ts",
+    "test:learning": "ts-node src/learning/test2.ts",
+    "example:code-analysis": "ts-node src/examples/example.ts",
+    "demo:learning": "ts-node src/learning/demo.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/uuid": "^10.0.0",
+    "@agentos/sdk": "file:./sdk",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "framer-motion": "^12.23.26",
+    "openai": "^6.15.0",
+    "uuid": "^13.0.0",
+    "ws": "^8.18.3",
+    "zustand": "^5.0.9"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.0.3",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
