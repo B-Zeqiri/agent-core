@@ -235,7 +235,14 @@ export default function OutputWindow(props: OutputWindowProps) {
     (uiState === 'running' ? 'in_progress' : uiState) ||
     'idle';
 
-  const isTerminal = statusText === 'completed' || statusText === 'failed' || statusText === 'cancelled';
+  const isTerminalStatus = (value?: string | null) =>
+    value === 'completed' || value === 'failed' || value === 'cancelled' || value === 'succeeded' || value === 'success';
+
+  const isTerminal =
+    isTerminalStatus(statusText) ||
+    isTerminalStatus(taskDetails?.status) ||
+    uiState === 'completed' ||
+    uiState === 'failed';
 
   const isActive =
     !isTerminal &&
