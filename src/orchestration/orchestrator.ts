@@ -250,9 +250,11 @@ export class Orchestrator {
       this.metrics.failedTasks++;
     }
 
-    const totalDuration = this.metrics.averageDuration * (this.metrics.completedTasks - 1) +
-                         (result.duration || 0);
-    this.metrics.averageDuration = totalDuration / this.metrics.completedTasks;
+    if (result.success && this.metrics.completedTasks > 0) {
+      const totalDuration = this.metrics.averageDuration * (this.metrics.completedTasks - 1) +
+        (result.duration || 0);
+      this.metrics.averageDuration = totalDuration / this.metrics.completedTasks;
+    }
     this.metrics.lastUpdated = Date.now();
   }
 

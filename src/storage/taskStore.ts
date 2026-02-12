@@ -56,6 +56,9 @@ export interface TaskRecord {
 
   // System mode (Assist, Power, Autonomous)
   systemMode?: 'assist' | 'power' | 'autonomous';
+
+  // Multi-agent mode enabled for this task
+  multiAgentEnabled?: boolean;
 }
 
 export interface TaskQuery {
@@ -182,6 +185,41 @@ export class TaskStore {
     }
 
     this.tasks.set(taskId, updated);
+    this.saveToDisk();
+    return updated;
+  }
+
+  /**
+   * Rekey a task ID while preserving history references.
+   */
+  rekeyTask(oldTaskId: string, newTaskId: string): TaskRecord | null {
+    if (oldTaskId === newTaskId) return this.tasks.get(oldTaskId) || null;
+    const task = this.tasks.get(oldTaskId);
+    if (!task) return null;
+    if (this.tasks.has(newTaskId)) return null;
+
+    const updated = { ...task, id: newTaskId };
+    this.tasks.delete(oldTaskId);
+    this.tasks.set(newTaskId, updated);
+
+    for (const record of this.tasks.values()) {
+      let changed = false;
+
+      if (Array.isArray(record.retries) && record.retries.includes(oldTaskId)) {
+        record.retries = record.retries.map((retryId) => (retryId === oldTaskId ? newTaskId : retryId));
+        changed = true;
+      }
+
+      if (record.originalTaskId === oldTaskId) {
+        record.originalTaskId = newTaskId;
+        changed = true;
+      }
+
+      if (changed) {
+        this.tasks.set(record.id, { ...record });
+      }
+    }
+
     this.saveToDisk();
     return updated;
   }

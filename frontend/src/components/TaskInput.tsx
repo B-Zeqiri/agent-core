@@ -8,6 +8,8 @@ interface TaskInputProps {
   generation: GenerationConfig;
   onGenerationChange: (next: GenerationConfig) => void;
   onPollTask: (taskId: string) => void;
+  multiAgentFailureAction: 'continue' | 'stop';
+  multiAgentRetries: number;
 }
 
 function TaskInput({
@@ -16,6 +18,8 @@ function TaskInput({
   generation,
   onGenerationChange,
   onPollTask,
+  multiAgentFailureAction,
+  multiAgentRetries,
 }: TaskInputProps) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -30,8 +34,8 @@ function TaskInput({
     mode: 'auto',
     planner: 'rule',
     failurePolicy: {
-      defaultAction: 'continue',
-      retries: 0,
+      defaultAction: multiAgentFailureAction,
+      retries: multiAgentRetries,
     },
   };
 

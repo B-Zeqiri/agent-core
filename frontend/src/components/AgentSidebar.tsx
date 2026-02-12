@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import SchedulerPanel from './SchedulerPanel';
 
 type AgentCard = {
   id: string;
@@ -14,7 +13,6 @@ type ApiAgent = {
   name: string;
   type?: string;
   metadata?: Record<string, any>;
-  status?: string;
 };
 
 type AgentMetric = {
@@ -45,8 +43,6 @@ interface AgentSidebarProps {
 function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<Record<string, AgentMetric>>({});
-  const [agentStatusById, setAgentStatusById] = useState<Record<string, string>>({});
-  const [runningTaskCount, setRunningTaskCount] = useState(0);
   const [agentCards, setAgentCards] = useState<AgentCard[]>([
     {
       id: 'web-dev-agent',
@@ -115,10 +111,9 @@ function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
 
     const load = async () => {
       try {
-        const [agentsRes, metricsRes, statusRes] = await Promise.allSettled([
+        const [agentsRes, metricsRes] = await Promise.allSettled([
           fetch('/api/agents'),
           fetch('/api/metrics/agents'),
-          fetch('/api/status'),
         ]);
 
         if (!cancelled && agentsRes.status === 'fulfilled' && agentsRes.value.ok) {
@@ -126,12 +121,6 @@ function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
           if (Array.isArray(data)) {
             const apiAgents = data as ApiAgent[];
             const nextCards = apiAgents.map(cardFromAgent);
-            const nextStatus: Record<string, string> = {};
-            apiAgents.forEach((a) => {
-              if (typeof a.id === 'string' && typeof a.status === 'string') {
-                nextStatus[a.id] = a.status;
-              }
-            });
 
             const order = new Map<string, number>([
               ['web-dev-agent', 1],
@@ -146,7 +135,6 @@ function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
             });
 
             setAgentCards(nextCards);
-            setAgentStatusById(nextStatus);
           }
         }
 
@@ -159,12 +147,6 @@ function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
             next[a.agentId] = a;
           }
           setMetrics(next);
-        }
-
-        if (!cancelled && statusRes.status === 'fulfilled' && statusRes.value.ok) {
-          const data = (await statusRes.value.json()) as any;
-          const running = typeof data?.runningTasks === 'number' ? data.runningTasks : 0;
-          setRunningTaskCount(running);
         }
       } catch {
         // ignore
@@ -186,9 +168,7 @@ function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
   };
 
   const isAgentActive = (card: AgentCard) => {
-    if (runningTaskCount === 0) return false;
-    if (agentStatusById[card.id] === 'BUSY') return true;
-    const activeList = (activeAgents.length > 0 ? activeAgents : [activeAgent || '']).filter(Boolean);
+    const activeList = activeAgents.length > 0 ? activeAgents : [activeAgent || ''];
     const idLower = card.id.toLowerCase();
     const labelLower = card.label.toLowerCase();
     return activeList.some((entry) => {
@@ -210,10 +190,7 @@ function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
   });
 
   return (
-    <div className="w-64 bg-gradient-to-b from-brand-dark/80 to-brand-panel/80 backdrop-blur-2xl border-r border-brand-accent/20 p-4 overflow-y-auto shadow-2xl">
-      <div className="mb-5">
-        <SchedulerPanel />
-      </div>
+    <div className="w-full flex-1 min-h-0 bg-gradient-to-b from-brand-dark/80 to-brand-panel/80 backdrop-blur-2xl border border-brand-accent/20 rounded-lg p-4 overflow-y-auto shadow-2xl">
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -234,6 +211,7 @@ function AgentSidebar({ activeAgent, activeAgents = [] }: AgentSidebarProps) {
       <div className="space-y-3">
         {sortedCards.map((card, idx) => {
           const m = metrics[card.id];
+
           const isActive = isAgentActive(card);
 
           const success = typeof m?.successRatePercent === 'number' ? m.successRatePercent : 0;

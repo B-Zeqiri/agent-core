@@ -148,6 +148,32 @@ console.log('✓ Old tasks deleted');
 console.log(`  Deleted ${deletedCount} task(s) older than 30 days`);
 console.log('');
 
+// Test 11: Rekey retry task
+console.log('Test 11: Rekey retry task');
+const task4 = store.createTask('Retry rekey', {
+  agent: 'web-dev-agent',
+  status: 'failed',
+});
+store.updateTask(task4.id, { status: 'failed' });
+const retry2 = store.createRetry(task4.id);
+const newRetryId = `rekey-${retry2?.id}`;
+const rekeyed = retry2 ? store.rekeyTask(retry2.id, newRetryId) : null;
+console.log('✓ Retry rekeyed:', rekeyed?.id);
+console.assert(rekeyed?.id === newRetryId, 'Rekey should update id');
+console.assert(store.getTask(newRetryId)?.id === newRetryId, 'New id should be retrievable');
+console.assert(store.getTask(retry2?.id || '') === null, 'Old id should not exist');
+const originalAfterRekey = store.getTask(task4.id);
+console.assert(
+  originalAfterRekey?.retries?.includes(newRetryId),
+  'Original task should reference new retry id'
+);
+const rekeyChain = store.getRetryChain(task4.id);
+console.assert(
+  rekeyChain.some((t) => t.id === newRetryId),
+  'Retry chain should include rekeyed id'
+);
+console.log('');
+
 console.log('✅ All tests passed!\n');
 
 // Cleanup

@@ -82,8 +82,19 @@ function detectContentType(content: string): 'code' | 'json' | 'error' | 'text' 
   return 'text';
 }
 
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function highlightCode(code: string): string {
   let cleanCode = code.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '');
+
+  cleanCode = escapeHtml(cleanCode);
 
   cleanCode = cleanCode
     .replace(
@@ -172,6 +183,7 @@ export default function OutputWindow(props: OutputWindowProps) {
         agentId: string;
         dependsOn: string[];
         status: 'pending' | 'running' | 'succeeded' | 'failed';
+        role?: string;
       }>;
     } | null;
   }>(null);
@@ -682,7 +694,7 @@ export default function OutputWindow(props: OutputWindowProps) {
         </div>
       )}
 
-      {workflowNodes.length > 1 && (
+      {workflowNodes.length > 0 && (
         <div className="px-4 py-3 border-b border-brand-border/60 bg-brand-panel/30 shrink-0">
           <WorkflowPanel
             taskId={taskDetails?.taskId}

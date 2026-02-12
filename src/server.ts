@@ -109,7 +109,7 @@ app.get('/api/models', (_req, res) => {
 
 // Initialize Kernel and Orchestrator
 const kernel = new Kernel();
-const orchestrator = new Orchestrator({ maxConcurrentTasks: 10, defaultTimeout: 60000 });
+const orchestrator = new Orchestrator({ maxConcurrentTasks: 10, defaultTimeout: 600000 });
 
 // Initialize Model Adapter (config-driven)
 // - MODEL_PROVIDER=gpt4all|ollama|openai
@@ -301,6 +301,7 @@ interface MultiAgentGraphSpec {
     agentId: string;
     dependsOn?: string[];
     objective?: string;
+    role?: string;
     allowFailure?: boolean;
     retries?: number;
   }>;
@@ -312,6 +313,7 @@ interface MultiAgentConfig {
   mode: MultiAgentMode;
   graph?: MultiAgentGraphSpec;
   failurePolicy: MultiAgentFailurePolicy;
+  nodeTimeoutMs: number;
 }
 
 type WorkflowNodeStatus = 'pending' | 'running' | 'succeeded' | 'failed';
@@ -321,6 +323,7 @@ interface WorkflowStateNode {
   agentId: string;
   dependsOn: string[];
   status: WorkflowNodeStatus;
+  role?: string;
 }
 
 interface WorkflowState {
@@ -337,6 +340,7 @@ function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
       planner: 'rule',
       mode: 'force',
       failurePolicy: { defaultAction: 'continue', retries: 0 },
+      nodeTimeoutMs: 600000,
     };
   }
 
@@ -346,6 +350,7 @@ function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
       planner: 'none',
       mode: 'force',
       failurePolicy: { defaultAction: 'stop', retries: 0 },
+      nodeTimeoutMs: 600000,
     };
   }
 
@@ -357,6 +362,11 @@ function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
     retries: typeof raw.failurePolicy?.retries === 'number' ? Math.max(0, Math.floor(raw.failurePolicy.retries)) : 0,
   };
 
+  const nodeTimeoutMs =
+    typeof raw.nodeTimeoutMs === 'number' && Number.isFinite(raw.nodeTimeoutMs) && raw.nodeTimeoutMs > 0
+      ? Math.floor(raw.nodeTimeoutMs)
+      : 600000;
+
   const graph = raw.graph && Array.isArray(raw.graph.nodes) ? (raw.graph as MultiAgentGraphSpec) : undefined;
 
   return {
@@ -365,6 +375,7 @@ function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
     mode,
     graph,
     failurePolicy,
+    nodeTimeoutMs,
   };
 }
 
@@ -392,13 +403,42 @@ function resolveFailureAction(nodeId: string, policy: MultiAgentFailurePolicy): 
   return policy.defaultAction === 'continue' ? 'continue' : 'stop';
 }
 
+function appendFinalNodeIfNeeded(
+  nodes: MultiAgentGraphSpec['nodes'],
+  policy: MultiAgentFailurePolicy,
+  finalAgentId?: string
+): MultiAgentGraphSpec['nodes'] {
+  if (!finalAgentId || finalAgentId.trim().length === 0) return nodes;
+
+  const hasFinal = nodes.some((node) => node.id === 'final' || node.role === 'final');
+  if (hasFinal) return nodes;
+
+  const dependsOn = nodes.map((node) => node.id);
+  return [
+    ...nodes,
+    {
+      id: 'final',
+      agentId: finalAgentId,
+      dependsOn,
+      objective: 'final',
+      role: 'final',
+      allowFailure: false,
+      retries: typeof policy.retries === 'number' ? policy.retries : 0,
+    },
+  ];
+}
+
 function buildGraphFromSpec(
   spec: MultiAgentGraphSpec,
   baseInput: Record<string, any>,
-  policy: MultiAgentFailurePolicy
+  policy: MultiAgentFailurePolicy,
+  finalAgentId?: string,
+  nodeTimeoutMs?: number
 ): TaskGraph {
+  const nodes = appendFinalNodeIfNeeded(spec.nodes, policy, finalAgentId);
+
   return {
-    nodes: spec.nodes.map((node) => ({
+    nodes: nodes.map((node) => ({
       id: node.id,
       dependsOn: node.dependsOn || [],
       allowFailure: node.allowFailure ?? (resolveFailureAction(node.id, policy) === 'continue'),
@@ -408,7 +448,12 @@ function buildGraphFromSpec(
         name: node.id,
         agentId: node.agentId,
         retries: typeof node.retries === 'number' ? node.retries : policy.retries,
-        input: { ...baseInput, objective: node.objective || node.id },
+        timeout: typeof nodeTimeoutMs === 'number' ? nodeTimeoutMs : undefined,
+        input: {
+          ...baseInput,
+          objective: node.objective || node.id,
+          ...(node.role ? { role: node.role } : {}),
+        },
       },
     })),
   };
@@ -417,7 +462,9 @@ function buildGraphFromSpec(
 function buildRuleGraph(
   input: string,
   baseInput: Record<string, any>,
-  policy: MultiAgentFailurePolicy
+  policy: MultiAgentFailurePolicy,
+  finalAgentId?: string,
+  nodeTimeoutMs?: number
 ): TaskGraph {
   const { wantsResearch, wantsBuild, wantsReview } = inferMultiAgentIntent(input);
 
@@ -452,10 +499,14 @@ function buildRuleGraph(
     return { ...node, dependsOn: index > 0 ? [nodes[index - 1].id] : [] };
   });
 
-  return buildGraphFromSpec({ nodes: finalNodes }, baseInput, policy);
+  return buildGraphFromSpec({ nodes: finalNodes }, baseInput, policy, finalAgentId, nodeTimeoutMs);
 }
 
-function getPlannedAgentsForMultiAgent(input: string, config: MultiAgentConfig): string[] {
+function getPlannedAgentsForMultiAgent(
+  input: string,
+  config: MultiAgentConfig,
+  finalAgentId?: string
+): string[] {
   const planned: string[] = [];
 
   if (config.graph?.nodes && config.graph.nodes.length > 0) {
@@ -469,6 +520,10 @@ function getPlannedAgentsForMultiAgent(input: string, config: MultiAgentConfig):
     if (wantsResearch) planned.push('research-agent');
     if (wantsBuild || planned.length === 0) planned.push('web-dev-agent');
     if (wantsReview) planned.push('system-agent');
+  }
+
+  if (finalAgentId && finalAgentId.trim().length > 0) {
+    planned.push(finalAgentId);
   }
 
   return Array.from(new Set(planned));
@@ -489,7 +544,20 @@ function extractMultiAgentOutput(raw: any): { text: string; failures: Array<{ ta
     return normalized.displayText || '';
   };
 
-  const text = pick('review') || pick('build') || pick('research') || normalizeAgentExecutionOutput(raw).displayText;
+  let text = pick('final');
+  if (!text) {
+    for (const key of Object.keys(outputs)) {
+      const payload = outputs[key];
+      if (payload && typeof payload === 'object' && payload.success === false) continue;
+      const candidate = normalizeAgentExecutionOutput(payload).displayText || '';
+      if (candidate) text = candidate;
+    }
+  }
+
+  if (!text) {
+    text = normalizeAgentExecutionOutput(raw).displayText;
+  }
+
   return { text, failures };
 }
 
@@ -1730,7 +1798,7 @@ app.post("/task", async (req, res) => {
       input,
       agentType,
       priority: 'normal',
-      timeout: 60000,
+      timeout: 600000,
       metadata: { clientIP: req.ip, timestamp: Date.now(), systemMode: reqSystemMode },
     });
 
@@ -1746,7 +1814,7 @@ app.post("/task", async (req, res) => {
       input,
       agentType,
       priority: 'normal',
-      timeout: 60000,
+      timeout: 600000,
       // systemMode is not part of TaskRequest, only store in TaskRecord
     });
 
@@ -1805,6 +1873,7 @@ app.post("/task", async (req, res) => {
         availableAgents: agents.map(a => a.id),
         manuallySelected: manuallySelected,
         systemMode: reqSystemMode,
+        multiAgentEnabled: isMultiAgent,
       });
       console.log(`[${id}] Task updated in TaskStore (retry/different agent)${manuallySelected ? ' - manually selected' : ''}`);
     } else {
@@ -1821,13 +1890,14 @@ app.post("/task", async (req, res) => {
         conversationId: conversationId || id, // Use provided conversationId or task ID as conversation ID
         manuallySelected: manuallySelected,
         systemMode: reqSystemMode,
+        multiAgentEnabled: isMultiAgent,
       });
       registeredTaskId = persistentTask.id;
       console.log(`[${id}] Task persisted to TaskStore${conversationId ? ` with conversationId: ${conversationId}` : ''}${manuallySelected ? ' - manually selected' : ''}`);
     }
 
     if (isMultiAgent) {
-      const plannedAgents = getPlannedAgentsForMultiAgent(input, multiAgentConfig);
+      const plannedAgents = getPlannedAgentsForMultiAgent(input, multiAgentConfig, selectedAgentId);
       if (plannedAgents.length > 1) {
         taskStore.updateTask(id, { involvedAgents: plannedAgents });
       }
@@ -1970,8 +2040,20 @@ async function executeTaskAsync(
 
     graph = multiAgent
       ? (multiAgentConfig.graph
-          ? buildGraphFromSpec(multiAgentConfig.graph, baseInput, multiAgentConfig.failurePolicy)
-          : buildRuleGraph(input, baseInput, multiAgentConfig.failurePolicy))
+          ? buildGraphFromSpec(
+              multiAgentConfig.graph,
+              baseInput,
+              multiAgentConfig.failurePolicy,
+              selectedAgentId,
+              multiAgentConfig.nodeTimeoutMs
+            )
+          : buildRuleGraph(
+              input,
+              baseInput,
+              multiAgentConfig.failurePolicy,
+              selectedAgentId,
+              multiAgentConfig.nodeTimeoutMs
+            ))
       : undefined;
 
     const plannedAgents = graph?.nodes
@@ -1994,6 +2076,7 @@ async function executeTaskAsync(
         agentId: node.task.agentId || 'unknown',
         dependsOn: node.dependsOn || [],
         status: 'pending' as WorkflowNodeStatus,
+        role: (node.task.input as any)?.role,
       }));
       workflowStateByTaskId.set(id, { nodes: stateNodes });
     }
@@ -2008,7 +2091,7 @@ async function executeTaskAsync(
           agentId: selectedAgentId,
           input: baseInput,
           graph,
-          timeout: 60000,
+          timeout: 600000,
         }
       : {
           id: `orchestration-${id}`,
@@ -2017,7 +2100,7 @@ async function executeTaskAsync(
           description: input,
           agentId: selectedAgentId,
           input: baseInput,
-          timeout: 60000,
+          timeout: 600000,
         };
 
     // Layer 3: Orchestrator - explicit workflow definition
@@ -2034,6 +2117,7 @@ async function executeTaskAsync(
             maxTime: 60,
             model: 'local',
             allowPartialFailures: true,
+            nodeTimeoutMs: multiAgentConfig.nodeTimeoutMs,
           },
         }
       : {
@@ -2345,7 +2429,10 @@ app.post("/api/history/:taskId/retry", async (req, res) => {
     const result = await response.json();
     
     // Update the retry task ID with the actual submitted task ID
-    taskStore.updateTask(retryTask.id, { id: result.taskId });
+    const rekeyed = taskStore.rekeyTask(retryTask.id, result.taskId);
+    if (!rekeyed) {
+      return res.status(500).json({ error: 'Failed to update retry task id' });
+    }
 
     res.json({
       retryTaskId: result.taskId,

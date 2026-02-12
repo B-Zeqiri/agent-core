@@ -6,6 +6,7 @@ type WorkflowNode = {
   agentId: string;
   dependsOn: string[];
   status: 'pending' | 'running' | 'succeeded' | 'failed';
+  role?: string;
 };
 
 type WorkflowPanelProps = {
@@ -20,39 +21,6 @@ type AgentMeta = {
   icon: React.ReactNode;
 };
 
-const agentMeta: AgentMeta[] = [
-  {
-    id: 'research-agent',
-    label: 'Research',
-    icon: (
-      <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}>
-        <circle cx="11" cy="11" r="7" />
-        <path d="M20 20l-3.5-3.5" />
-      </svg>
-    ),
-  },
-  {
-    id: 'web-dev-agent',
-    label: 'Build',
-    icon: (
-      <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}>
-        <path d="M8 17l-5-5 5-5" />
-        <path d="M16 7l5 5-5 5" />
-      </svg>
-    ),
-  },
-  {
-    id: 'system-agent',
-    label: 'Review',
-    icon: (
-      <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}>
-        <path d="M12 3l7 4v5c0 4.5-3.1 8.5-7 9-3.9-.5-7-4.5-7-9V7l7-4z" />
-        <path d="M9 12l2 2 4-4" />
-      </svg>
-    ),
-  },
-];
-
 const fallbackMeta: AgentMeta = {
   id: 'unknown',
   label: 'Agent',
@@ -65,7 +33,15 @@ const fallbackMeta: AgentMeta = {
 };
 
 function getAgentMeta(id: string): AgentMeta {
-  return agentMeta.find((a) => a.id === id) || { ...fallbackMeta, id };
+  const clean = id.replace(/-?agent$/i, '').trim();
+  const label = clean
+    ? clean
+        .split(/[-_\s]+/)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ')
+    : fallbackMeta.label;
+
+  return { ...fallbackMeta, id, label };
 }
 
 function computeLevels(nodes: WorkflowNode[]) {
@@ -128,7 +104,7 @@ function statusStyles(status: WorkflowNode['status']) {
 
 export default function WorkflowPanel({ taskId, status, nodes = [] }: WorkflowPanelProps) {
   const columns = useMemo(() => computeLevels(nodes), [nodes]);
-  const visible = nodes.length > 1;
+  const visible = nodes.length > 0;
 
   const panelStyle: React.CSSProperties = {
     ['--wf-panel' as any]: 'rgba(14, 18, 28, 0.9)',
@@ -174,7 +150,8 @@ export default function WorkflowPanel({ taskId, status, nodes = [] }: WorkflowPa
               {column.map((node, nodeIndex) => {
                 const meta = getAgentMeta(node.agentId);
                 const styles = statusStyles(node.status);
-                const label = `${meta.label} (${node.status})`;
+                const nodeLabel = node.role === 'final' || node.id === 'final' ? 'Final' : meta.label;
+                const label = `${nodeLabel} (${node.status})`;
 
                 return (
                   <motion.div
@@ -203,7 +180,7 @@ export default function WorkflowPanel({ taskId, status, nodes = [] }: WorkflowPa
                       )}
                     </div>
                     <div className="mt-2 text-[10px] text-brand-muted text-center uppercase tracking-[0.28em]">
-                      {node.id}
+                      {node.role === 'final' || node.id === 'final' ? 'final' : node.id}
                     </div>
                   </motion.div>
                 );

@@ -41,6 +41,40 @@ export class TaskExecutor {
   ): Promise<TaskResult> {
     throwIfAborted(options?.signal);
 
+    const localAbortController = new AbortController();
+    const propagateAbort = () => {
+      const reason = (options?.signal as any)?.reason;
+      try {
+        (localAbortController as any).abort?.(reason ?? new Error('Task aborted'));
+      } catch {
+        localAbortController.abort();
+      }
+    };
+
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        propagateAbort();
+      } else {
+        options.signal.addEventListener('abort', propagateAbort, { once: true });
+      }
+    }
+
+    let timeoutId: NodeJS.Timeout | null = null;
+    if (typeof task.timeout === 'number' && task.timeout > 0) {
+      timeoutId = setTimeout(() => {
+        try {
+          (localAbortController as any).abort?.(new Error('Task timeout exceeded'));
+        } catch {
+          localAbortController.abort();
+        }
+      }, task.timeout);
+    }
+
+    const taskOptions: TaskExecutionOptions = {
+      ...options,
+      signal: localAbortController.signal,
+    };
+
     // Create context for this task
     const context = contextManager.createContext(
       task.id,
@@ -58,7 +92,7 @@ export class TaskExecutor {
 
     try {
       const startTime = Date.now();
-      const result = await this.executeByType(task, context, agentRegistry, options);
+      const result = await this.executeByType(task, context, agentRegistry, taskOptions);
       const duration = Date.now() - startTime;
 
       // Call success callback
@@ -91,6 +125,12 @@ export class TaskExecutor {
         context,
       };
     } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      if (options?.signal) {
+        options.signal.removeEventListener('abort', propagateAbort);
+      }
       contextManager.cleanupContext(context.taskId);
     }
   }

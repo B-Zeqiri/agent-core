@@ -518,6 +518,60 @@ async function testMultiAgentCoordination() {
   const graphExecution = await orchestrator.executeWorkflow('graph-wf');
   await assert(graphExecution.status === 'succeeded', 'Graph workflow tolerates partial failure');
 
+  // Test 3b: Graph workflow with explicit final node output
+  const finalWorkflow = orchestrator.createWorkflow(
+    'final-wf',
+    'Final Output Aggregation',
+    {
+      id: 'final-root',
+      type: 'graph',
+      name: 'Final output graph',
+      graph: {
+        nodes: [
+          {
+            id: 'node-a',
+            task: {
+              id: 'node-a-final-task',
+              type: 'atomic',
+              name: 'Node A final',
+              agentId: 'agent-a',
+              input: { step: 'a' },
+            },
+          },
+          {
+            id: 'node-b',
+            task: {
+              id: 'node-b-final-task',
+              type: 'atomic',
+              name: 'Node B final',
+              agentId: 'agent-b',
+              input: { step: 'b' },
+            },
+          },
+          {
+            id: 'final',
+            dependsOn: ['node-a', 'node-b'],
+            task: {
+              id: 'final-task',
+              type: 'atomic',
+              name: 'Final output',
+              agentId: 'agent-c',
+              input: { role: 'final' },
+            },
+          },
+        ],
+      },
+    }
+  );
+
+  const finalExecution = await orchestrator.executeWorkflow('final-wf');
+  await assert(finalExecution.status === 'succeeded', 'Final node graph succeeded');
+  const finalOutputs = (finalExecution.result as any)?.output?.outputs;
+  await assert(
+    typeof finalOutputs?.final === 'string' && finalOutputs.final.includes('Agent C'),
+    'Final node output captured'
+  );
+
   // Test 4: Context sharing across agents
   const contextSharingWorkflow = orchestrator.createWorkflow(
     'context-wf',

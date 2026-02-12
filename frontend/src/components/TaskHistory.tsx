@@ -22,6 +22,7 @@ interface TaskHistoryItem {
   retryCount?: number;
   availableAgents?: string[];
   conversationId?: string; // Links related questions in same conversation
+  multiAgentEnabled?: boolean;
 }
 
 const MAX_HISTORY_ITEMS = 50; // Increased from 20
@@ -109,7 +110,7 @@ export function TaskHistory() {
             id: task.id,
             taskText: task.input,
             agent: task.agent || 'Unknown',
-              involvedAgents: Array.isArray(task.involvedAgents) ? task.involvedAgents : undefined,
+            involvedAgents: Array.isArray(task.involvedAgents) ? task.involvedAgents : undefined,
             status: task.status,
             duration: task.durationMs || 0,
             resultPreview: cleanOutput.substring(0, 150) + (cleanOutput.length > 150 ? '...' : ''),
@@ -122,6 +123,7 @@ export function TaskHistory() {
             retryCount: task.retryCount,
             availableAgents: task.availableAgents,
             conversationId: task.conversationId,
+            multiAgentEnabled: task.multiAgentEnabled === true,
           };
         });
 
@@ -525,10 +527,12 @@ export function TaskHistory() {
                             {displayTask.agent}
                           </span>
 
-                          {displayTask.involvedAgents && displayTask.involvedAgents.length > 1 && (
+                          {(displayTask.multiAgentEnabled || (displayTask.involvedAgents && displayTask.involvedAgents.length > 1)) && (
                             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold tracking-wide bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-rose-500/15 border border-amber-400/40 text-amber-200 shadow-sm shadow-amber-500/20">
                               <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
-                              {`+${displayTask.involvedAgents.length - 1} agents`}
+                              {displayTask.involvedAgents && displayTask.involvedAgents.length > 1
+                                ? `+${displayTask.involvedAgents.length - 1} agents`
+                                : 'multi-agent'}
                             </span>
                           )}
                           

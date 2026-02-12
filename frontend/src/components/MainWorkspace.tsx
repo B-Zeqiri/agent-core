@@ -6,7 +6,7 @@ import TaskTimeline from './TaskTimeline';
 import OutputWindow from './OutputWindow';
 import { TaskHistory } from './TaskHistory';
 import FailurePanel, { FailureDetails } from './FailurePanel';
-import { ExplainabilityData } from './ExplainabilityPanel';
+import ExplainabilityPanel, { ExplainabilityData } from './ExplainabilityPanel';
 
 interface MainWorkspaceProps {
   uiState: UIState;
@@ -47,15 +47,20 @@ function MainWorkspace({
   const [generationConfig, setGenerationConfig] = React.useState<GenerationConfig>({
     mode: 'creative',
   });
-  const autoMultiAgentPayload = React.useMemo(
-    () => ({
+  const [multiAgentFailureAction] = React.useState<'continue' | 'stop'>('continue');
+  const [multiAgentRetries] = React.useState(0);
+
+  const buildMultiAgentPayload = React.useCallback(() => {
+    return {
       enabled: true,
       mode: 'auto',
       planner: 'rule',
-      failurePolicy: { defaultAction: 'continue', retries: 0 },
-    }),
-    []
-  );
+      failurePolicy: {
+        defaultAction: multiAgentFailureAction,
+        retries: multiAgentRetries,
+      },
+    };
+  }, [multiAgentFailureAction, multiAgentRetries]);
 
   const currentTaskRef = React.useRef<Task | null>(null);
   const conversationHistoryRef = React.useRef(conversationHistory);
@@ -67,6 +72,64 @@ function MainWorkspace({
   useEffect(() => {
     conversationHistoryRef.current = conversationHistory;
   }, [conversationHistory]);
+  React.useEffect(() => {
+    if (!onActiveAgentsChange) return;
+
+    const id = currentTask?.id;
+    const isActive =
+      currentTask?.status === 'pending' ||
+      currentTask?.status === 'in_progress' ||
+      currentTask?.status === 'queued' ||
+      uiState === 'submitting';
+
+    if (!id || String(id).includes('pending') || !isActive) {
+      onActiveAgentsChange([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/task/${encodeURIComponent(id)}/details`);
+        if (!res.ok) return;
+        const data: any = await res.json();
+        if (cancelled || !data?.ok) return;
+
+        const nodes = Array.isArray(data?.graph?.nodes) ? data.graph.nodes : [];
+        const running = nodes
+          .filter((n: any) => n?.status === 'running')
+          .map((n: any) => String(n.agentId || ''))
+          .filter(Boolean);
+
+        if (running.length > 0) {
+          onActiveAgentsChange(Array.from(new Set(running)));
+          return;
+        }
+
+        const isRunning =
+          data?.status === 'running' ||
+          currentTask?.status === 'in_progress' ||
+          currentTask?.status === 'running';
+        const fallbackAgent =
+          (typeof data?.agentId === 'string' && data.agentId) ||
+          (typeof data?.agentName === 'string' && data.agentName) ||
+          (typeof currentTask?.agent === 'string' && currentTask.agent) ||
+          '';
+        onActiveAgentsChange(isRunning && fallbackAgent ? [fallbackAgent] : []);
+      } catch {
+        // ignore
+      }
+    };
+
+    load();
+    const t = setInterval(load, 1200);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [currentTask?.id, currentTask?.status, uiState, onActiveAgentsChange]);
+
   const [failureDetails, setFailureDetails] = React.useState<FailureDetails | null>(null);
   const [isServerConnected, setIsServerConnected] = React.useState(true);
   const [lastConnectionCheck, setLastConnectionCheck] = React.useState<number>(Date.now());
@@ -119,63 +182,6 @@ function MainWorkspace({
     }
     return String(raw);
   }, []);
-
-  React.useEffect(() => {
-    if (!onActiveAgentsChange) return;
-
-    const id = currentTask?.id;
-    const isActive =
-      currentTask?.status === 'pending' ||
-      currentTask?.status === 'in_progress' ||
-      currentTask?.status === 'queued' ||
-      uiState === 'submitting';
-
-    if (!id || String(id).includes('pending') || !isActive) {
-      onActiveAgentsChange([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        const res = await fetch(`/api/task/${encodeURIComponent(id)}/details`);
-        if (!res.ok) return;
-        const data: any = await res.json();
-        if (cancelled || !data?.ok) return;
-
-        const nodes = Array.isArray(data?.graph?.nodes) ? data.graph.nodes : [];
-        const running = nodes
-          .filter((n: any) => n?.status === 'running')
-          .map((n: any) => String(n.agentId || ''))
-          .filter(Boolean);
-
-        if (running.length > 0) {
-          onActiveAgentsChange(Array.from(new Set(running)));
-        } else {
-          const isRunning =
-            data?.status === 'running' ||
-            currentTask?.status === 'in_progress' ||
-            currentTask?.status === 'running';
-          const fallbackAgent =
-            (typeof data?.agentId === 'string' && data.agentId) ||
-            (typeof data?.agentName === 'string' && data.agentName) ||
-            (typeof currentTask?.agent === 'string' && currentTask.agent) ||
-            '';
-          onActiveAgentsChange(isRunning && fallbackAgent ? [fallbackAgent] : []);
-        }
-      } catch {
-        // ignore
-      }
-    };
-
-    load();
-    const t = setInterval(load, 1200);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-  }, [currentTask?.id, currentTask?.status, uiState, onActiveAgentsChange]);
 
   useEffect(() => {
     conversationIdRef.current = conversationId;
@@ -492,7 +498,7 @@ function MainWorkspace({
           input: followUpText,
           conversationId: effectiveConversationId,
           generation: effectiveGeneration,
-          multiAgent: autoMultiAgentPayload,
+          multiAgent: buildMultiAgentPayload(),
         }),
       });
 
@@ -826,7 +832,7 @@ function MainWorkspace({
           taskId: reuseTaskId,
           conversationId: conversationId || undefined,
           generation: effectiveGeneration,
-          multiAgent: autoMultiAgentPayload,
+          multiAgent: buildMultiAgentPayload(),
         }),
       });
 
@@ -997,6 +1003,8 @@ function MainWorkspace({
                 generation={generationConfig}
                 onGenerationChange={setGenerationConfig}
                 onPollTask={startTaskUpdates}
+                multiAgentFailureAction={multiAgentFailureAction}
+                multiAgentRetries={multiAgentRetries}
               />
             </motion.div>
           )}
@@ -1010,88 +1018,47 @@ function MainWorkspace({
               className="flex-1 flex flex-col overflow-hidden"
             >
               <div className="flex flex-col gap-4 overflow-y-auto h-full">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div className="bg-brand-panel border border-brand-border rounded-lg p-4 flex-shrink-0">
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-full border border-brand-accent/30 bg-brand-dark/60 flex items-center justify-center text-brand-accent">
-                          {explainability?.agentId === 'research-agent' ? (
-                            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}>
-                              <circle cx="11" cy="11" r="7" />
-                              <path d="M20 20l-3.5-3.5" />
-                            </svg>
-                          ) : explainability?.agentId === 'web-dev-agent' ? (
-                            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}>
-                              <path d="M8 17l-5-5 5-5" />
-                              <path d="M16 7l5 5-5 5" />
-                            </svg>
-                          ) : explainability?.agentId === 'system-agent' ? (
-                            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}>
-                              <path d="M12 3l7 4v5c0 4.5-3.1 8.5-7 9-3.9-.5-7-4.5-7-9V7l7-4z" />
-                              <path d="M9 12l2 2 4-4" />
-                            </svg>
-                          ) : (
-                            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}>
-                              <circle cx="12" cy="7" r="4" />
-                              <path d="M4 21c2-4 14-4 16 0" />
-                            </svg>
-                          )}
+                <div className="bg-brand-panel border border-brand-border rounded-lg p-4 flex-shrink-0">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-xs text-brand-muted mb-1">Task ID</div>
+                      <div className="text-sm font-mono text-brand-accent">{currentTask.id}</div>
+
+                      {showConversationDebug && (
+                        <div className="mt-2">
+                          <div className="text-xs text-brand-muted mb-1">Conversation</div>
+                          <div className="text-xs font-mono text-brand-muted">{conversationId || '(none)'}</div>
                         </div>
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-white truncate">
-                            {explainability?.agentName || currentTask.agent || 'Agent'}
-                          </div>
-                          <div className="text-[11px] text-brand-muted font-mono truncate">
-                            {currentTask.id.slice(0, 8)}…{currentTask.id.slice(-4)}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap justify-end gap-2">
-                        {explainability?.agentSelectionReason && /multi-agent/i.test(explainability.agentSelectionReason) && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wider border border-brand-accent/40 text-brand-accent">
-                            multi-agent
-                          </span>
-                        )}
-                        {explainability?.taskTypeLabel && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wider border border-brand-border/60 text-brand-muted">
-                            {explainability.taskTypeLabel}
-                          </span>
-                        )}
-                      </div>
+                      )}
                     </div>
-
-                    {explainability?.agentSelectionReason && (
-                      <div className="mt-2 text-[11px] text-brand-muted line-clamp-1" title={explainability.agentSelectionReason}>
-                        {explainability.agentSelectionReason}
-                      </div>
-                    )}
-
-                    {showConversationDebug && (
-                      <div className="mt-2 text-[11px] text-brand-muted font-mono truncate">
-                        Conversation: {conversationId || '(none)'}
-                      </div>
-                    )}
-
-                    {(uiState === 'submitting' || uiState === 'queued' || uiState === 'running') && (
-                      <div className="mt-3">
-                        <div className="w-full bg-brand-border rounded-full h-1 overflow-hidden relative">
-                          <motion.div
-                            className="h-full bg-gradient-to-r from-brand-accent via-blue-400 to-brand-accent rounded-full relative overflow-hidden"
-                            style={{ width: progressWidth }}
-                          >
-                            <motion.div
-                              className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent"
-                              animate={{ x: [-200, 200] }}
-                              transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
-                            />
-                          </motion.div>
-                        </div>
-                      </div>
-                    )}
+                    <div>
+                      <div className="text-xs text-brand-muted mb-1">Agent</div>
+                      <div className="text-sm text-brand-text">{currentTask.agent || 'Unknown'}</div>
+                    </div>
                   </div>
 
-                  <TaskTimeline status={currentTask.status} messages={currentTask.messages} agent={currentTask.agent} />
+                  <ExplainabilityPanel data={explainability} />
+
+                  {(uiState === 'submitting' || uiState === 'queued' || uiState === 'running') && (
+                    <div className="mt-4">
+                      <div className="text-xs text-brand-muted mb-2">Progress</div>
+                      <div className="w-full bg-brand-border rounded-full h-1.5 overflow-hidden relative">
+                        <motion.div
+                          className="h-full bg-gradient-to-r from-brand-accent via-blue-400 to-brand-accent rounded-full relative overflow-hidden shadow-lg shadow-brand-accent/50"
+                          style={{ width: progressWidth }}
+                        >
+                          <motion.div
+                            className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent"
+                            animate={{ x: [-200, 200] }}
+                            transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                          />
+                        </motion.div>
+                      </div>
+                    </div>
+                  )}
                 </div>
+
+                <TaskTimeline status={currentTask.status} messages={currentTask.messages} agent={currentTask.agent} />
 
                 {/* Show Failure Panel for failed tasks */}
                 {uiState === 'failed' && failureDetails && (
@@ -1135,7 +1102,7 @@ function MainWorkspace({
         </AnimatePresence>
       </div>
 
-      {/* Right sidebar */}
+      {/* Task History Panel */}
       <div className="w-80 flex-shrink-0">
         <TaskHistory />
       </div>
