@@ -114,7 +114,6 @@ agent-core/
 │   │   ├── types.ts
 │   │   ├── wsServer.ts
 │   │   ├── api.ts
-│   │   ├── test.ts
 │   │   └── public/
 │   │       └── index.html
 │   ├── server.ts
@@ -145,7 +144,6 @@ npm run test:tools          # Phase 4
 npm run test:scheduler      # Phase 5
 npm run test:ipc            # Phase 6
 npm run test:observability  # Phase 7
-npm run test:ui             # Phase 8
 ```
 
 ### Test Results Summary
@@ -163,7 +161,6 @@ Phase Breakdown:
 ✓ Phase 5 (Scheduler):        31/31 tests
 ✓ Phase 6 (IPC):              22/22 tests
 ✓ Phase 7 (Observability):    46/46 tests
-✓ Phase 8 (UI):               46/46 tests
 ```
 
 ---
@@ -237,7 +234,6 @@ Each phase includes comprehensive test files documenting usage:
 - `src/scheduler/test.ts` - Scheduler examples
 - `src/ipc/test.ts` - IPC examples
 - `src/observability/test.ts` - Observability examples
-- `src/ui/test.ts` - UI examples
 
 ---
 
@@ -288,6 +284,55 @@ Each phase includes comprehensive test files documenting usage:
 - Metrics aggregation
 - WebSocket broadcasting
 - Configurable update intervals
+
+---
+
+## 🧰 Operations
+
+### Persistence + Retention
+- DB driver: PERSIST_DB_DRIVER=sqlite|postgres (default sqlite)
+- SQLite at .data/agent-core.db (override with PERSIST_DB_PATH)
+- Postgres URL: PG_URL or POSTGRES_URL (or DATABASE_URL)
+- Run migrations: npm run migrate:postgres
+- Retention cleanup runs daily by default (PERSIST_RETENTION_DAYS, PERSIST_CLEANUP_INTERVAL_MS)
+
+### Backups + Verification
+- Backups enabled by default for SQLite (PERSIST_BACKUPS=1)
+- Backup directory: .data/backups (override with PERSIST_BACKUP_DIR)
+- Backup cadence: PERSIST_BACKUP_INTERVAL_MS (default daily)
+- Verify latest backup: npm run verify:backup
+- Verify specific backup: npm run verify:backup -- .data/backups/agent-core-YYYYMMDD-HHMMSS.db
+
+### DB Retry Strategy + Error Reporting
+- SQLite busy timeout: PERSIST_DB_BUSY_TIMEOUT_MS (default 5000)
+- Retries on transient DB errors: PERSIST_DB_RETRIES (default 3)
+- Backoff: PERSIST_DB_RETRY_BASE_MS (100), PERSIST_DB_RETRY_JITTER_MS (50), PERSIST_DB_RETRY_MAX_MS (2000)
+- Alerts go to server logs only (console warning/error)
+
+### Disk Usage Monitoring
+- DB size threshold: PERSIST_DB_MAX_MB (default 1024)
+- Backup size threshold: PERSIST_BACKUP_MAX_MB (default 2048)
+- Check interval: PERSIST_DISK_CHECK_INTERVAL_MS (default daily)
+
+### Load Testing
+- Default target: 5 tasks/min, max 2 in flight
+- Run: npm run load:test
+- Override: npm run load:test -- --ratePerMin=5 --durationSec=120 --maxInFlight=2 --url=http://localhost:3000
+
+### Queue + Workers (Multi-Node Baseline)
+- Queue driver: QUEUE_DRIVER=local|redis (default local)
+- Redis URL: REDIS_URL (default redis://localhost:6379)
+- Start worker in process: QUEUE_START_WORKER=1 (default on for local)
+- Worker-only mode: WORKER_ONLY=1 (disables HTTP server)
+- Worker concurrency: QUEUE_WORKER_CONCURRENCY (default 2)
+- Job retry/backoff: QUEUE_MAX_ATTEMPTS (default 3), QUEUE_BACKOFF_MS (default 1000)
+- DLQ queue: {QUEUE_NAME}-dlq (auto moves jobs after max attempts)
+- Queue metrics endpoint: GET /api/queue/status
+
+### Soak Testing
+- Default target: 10 tasks/min for 2 hours, max 5 in flight
+- Run: npm run soak:test
+- Override: npm run soak:test -- --ratePerMin=10 --durationSec=7200 --maxInFlight=5 --url=http://localhost:3000
 
 ---
 
@@ -393,6 +438,6 @@ Next Focus:       Multi-agent V1 hardening
 
 ---
 
-**Last Updated**: 2026-02-12
+**Last Updated**: 2026-02-17
 **Status**: Production Hardening 🛠️
 **V1 Readiness**: In Progress 🟡

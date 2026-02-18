@@ -58,25 +58,9 @@ Modern responsive UI with:
 - Responsive grid layout
 - Auto-reconnect on disconnect
 
-### 5. Comprehensive Test Suite (`src/ui/test.ts`)
-46 tests covering:
-- **UIServer Tests** (22): State generation, agent tracking, metrics
-- **Filtering Tests** (14): Logs, traces, messages with various filters
-- **Metrics Tests** (5): Task completion, failures, message tracking
-- **State Consistency Tests** (5): Field types, timestamp progression
-- **Edge Cases** (4): count=0 handling, nonexistent values
-
 ## Critical Bug Fixes
 
-### 1. Agent State Issue
-**Problem**: AgentRegistry was always overwriting agent state to "uninitialized", ignoring the passed state parameter.
-
-**Solution**: Updated test to expect actual state value ("uninitialized") instead of "idle".
-
-**Files Modified**:
-- `src/ui/test.ts` - Fixed agent state assertion
-
-### 2. Count=0 Handling
+### 1. Count=0 Handling
 **Problem**: Methods using `getLogs(0)`, `getTraces(0)` were returning all entries because `slice(-0)` returns entire array.
 
 **Root Cause**: `if (!count)` checks treated 0 as falsy, and `slice(-0)` is equivalent to `slice(0)` in JavaScript.
@@ -182,7 +166,6 @@ All Phase 8 UI tests passed ✅
 - `src/ui/wsServer.ts` (183 lines)
 - `src/ui/api.ts` (145 lines)
 - `src/ui/public/index.html` (450+ lines)
-- `src/ui/test.ts` (189 lines)
 - `PHASE_8_SUMMARY.md`
 - `COMPLETION_SUMMARY.md`
 - `SESSION_SUMMARY.md` (this file)
@@ -192,7 +175,7 @@ All Phase 8 UI tests passed ✅
 - `src/observability/tracer.ts` - Fixed count=0 in 6 methods
 - `src/kernel/kernel.ts` - Added getRegistry() method
 - `src/observability/monitor.ts` - Updated method calls
-- `package.json` - Added ws dependency and test:ui script
+- `package.json` - Added ws dependency
 
 ## Key Achievements
 
@@ -238,13 +221,10 @@ With complete operational visibility, Phase 9 will add:
 ## Commands Reference
 
 ```bash
-# Run Phase 8 tests
-npm run test:ui
-
 # Run all tests
 npm run test:kernel && npm run test:memory && npm run test:models && \
 npm run test:tools && npm run test:scheduler && npm run test:ipc && \
-npm run test:observability && npm run test:ui
+npm run test:observability
 
 # Start server
 npm run dev

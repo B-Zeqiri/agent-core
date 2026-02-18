@@ -4,10 +4,25 @@
  * Tracks security-relevant events: tool executions, timeouts, permission denials, etc.
  */
 
+import { auditStore } from "../storage/auditStore";
+
 export interface AuditEvent {
   timestamp: number;
-  eventType: 'tool-call' | 'tool-timeout' | 'permission-denied' | 'rate-limit-exceeded' | 'execution-error';
+  eventType:
+    | "tool-call"
+    | "tool-timeout"
+    | "permission-denied"
+    | "rate-limit-exceeded"
+    | "execution-error"
+    | "model-call"
+    | "memory-read"
+    | "memory-write"
+    | "task-event"
+    | "agent-lifecycle"
+    | "agent-version-missing"
+    | "db-error";
   agentId: string;
+  taskId?: string;
   toolName?: string;
   details: Record<string, any>;
 }
@@ -27,6 +42,15 @@ export class AuditLogger {
     };
 
     this.events.push(auditEvent);
+
+    auditStore.addEvent({
+      timestamp: auditEvent.timestamp,
+      eventType: auditEvent.eventType,
+      agentId: auditEvent.agentId,
+      taskId: auditEvent.taskId,
+      toolName: auditEvent.toolName,
+      details: auditEvent.details,
+    });
 
     // Keep only recent events
     if (this.events.length > this.maxEvents) {

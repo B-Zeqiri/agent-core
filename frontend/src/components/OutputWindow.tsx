@@ -169,6 +169,7 @@ export default function OutputWindow(props: OutputWindowProps) {
     status: string;
     currentStep: string | null;
     cancelable: boolean;
+    multiAgentEnabled?: boolean;
     logs: Array<{
       ts: number;
       type: string;
@@ -274,6 +275,7 @@ export default function OutputWindow(props: OutputWindowProps) {
             status: String(data.status || ''),
             currentStep: typeof data.currentStep === 'string' ? data.currentStep : null,
             cancelable: Boolean(data.cancelable),
+            multiAgentEnabled: data.multiAgentEnabled === true,
             logs: Array.isArray(data.logs) ? data.logs : [],
             workflow: data.workflow ?? null,
             graph: data.graph ?? null,
@@ -526,15 +528,21 @@ export default function OutputWindow(props: OutputWindowProps) {
     return <div className="text-sm text-white whitespace-pre-wrap break-words leading-relaxed">{content}</div>;
   };
 
-  const visibleStep = taskDetails?.currentStep && !isInternalEventLabel(taskDetails.currentStep)
-    ? taskDetails.currentStep
-    : null;
+  const isMultiAgent = taskDetails?.multiAgentEnabled === true;
+  const rawStep = taskDetails?.currentStep ? String(taskDetails.currentStep) : null;
+  const hideGraphStep = !isMultiAgent && rawStep && /^graph\./i.test(rawStep);
+  const visibleStep = rawStep && !hideGraphStep && !isInternalEventLabel(rawStep) ? rawStep : null;
 
-  const visibleLogs = (taskDetails?.logs || []).filter(l => !isInternalEventLabel(String(l?.message || '')));
+  const visibleLogs = (taskDetails?.logs || []).filter(l => {
+    const message = String(l?.message || '');
+    if (!isMultiAgent && /^graph\./i.test(message)) return false;
+    return !isInternalEventLabel(message);
+  });
 
   const showDetailsStrip = Boolean(visibleStep || visibleLogs.length > 0);
 
-  const workflowNodes = taskDetails?.graph?.nodes || [];
+  const workflowEnabled = taskDetails?.multiAgentEnabled === true;
+  const workflowNodes = workflowEnabled ? taskDetails?.graph?.nodes || [] : [];
 
   return (
     <motion.div
@@ -701,7 +709,7 @@ export default function OutputWindow(props: OutputWindowProps) {
         </div>
       )}
 
-      {workflowNodes.length > 0 && (
+      {workflowEnabled && workflowNodes.length > 0 && (
         <div className="px-4 py-3 border-b border-brand-border/60 bg-brand-panel/30 shrink-0">
           <WorkflowPanel
             taskId={taskDetails?.taskId}

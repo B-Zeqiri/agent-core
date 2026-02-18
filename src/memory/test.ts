@@ -156,7 +156,7 @@ async function runTests() {
   // ============ MEMORY MANAGER TESTS ============
 
   test("MemoryManager — Agent Memory Creation");
-  const mm = new MemoryManager();
+  const mm = new MemoryManager({ enablePersistence: false });
 
   mm.createAgentMemory("agent-a");
   mm.createAgentMemory("agent-b");
@@ -226,7 +226,7 @@ async function runTests() {
   }
 
   test("MemoryManager — Context Window");
-  const mm2 = new MemoryManager();
+  const mm2 = new MemoryManager({ enablePersistence: false });
   mm2.createAgentMemory("agent-c");
 
   mm2.writeShort("agent-c", "agent-c", "Previous message", "text");
@@ -253,7 +253,7 @@ async function runTests() {
   // ============ VECTOR SEARCH WITH ACL ============
 
   test("MemoryManager — Semantic Search (with ACL)");
-  const mm3 = new MemoryManager(true); // Enable vector search
+  const mm3 = new MemoryManager({ enableVectorSearch: true, enablePersistence: false });
 
   mm3.createAgentMemory("agent-x");
   mm3.createAgentMemory("agent-y");

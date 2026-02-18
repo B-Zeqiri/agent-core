@@ -183,7 +183,6 @@ Core phases are implemented and tested. Multi-agent V1 hardening is in progress 
 - `src/ui/wsServer.ts` - WebSocket server
 - `src/ui/api.ts` - Dashboard REST API
 - `src/ui/public/index.html` - Dashboard UI
-- `src/ui/test.ts` - UI test suite
 
 ---
 
@@ -265,7 +264,6 @@ npm run test:tools            # Phase 4
 npm run test:scheduler        # Phase 5
 npm run test:ipc              # Phase 6
 npm run test:observability    # Phase 7
-npm run test:ui               # Phase 8
 
 # Integration test
 npm run test:ipc:integration  # IPC + Scheduler integration
@@ -273,7 +271,7 @@ npm run test:ipc:integration  # IPC + Scheduler integration
 # All tests
 npm run test:kernel && npm run test:memory && npm run test:models && \
 npm run test:tools && npm run test:scheduler && npm run test:ipc && \
-npm run test:observability && npm run test:ui
+npm run test:observability
 ```
 
 ---

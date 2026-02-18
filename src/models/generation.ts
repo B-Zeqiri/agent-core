@@ -12,4 +12,7 @@ export interface ModelCallOverrides {
   maxTokens?: number;
   seed?: number;
   signal?: AbortSignal;
+  taskId?: string;
+  agentId?: string;
+  agentVersion?: string;
 }

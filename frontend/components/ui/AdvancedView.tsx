@@ -38,7 +38,11 @@ const AdvancedView = React.memo(function AdvancedView({
   stateChanges = [],
 }: AdvancedViewProps) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [fetchedToolCalls, setFetchedToolCalls] = useState<ToolCall[]>([]);
+  const [fetchedStateChanges, setFetchedStateChanges] = useState<StateChange[]>([]);
   const lastLogSignature = useRef<string>("");
+  const lastToolCallSignature = useRef<string>("");
+  const lastStateChangeSignature = useRef<string>("");
 
   useEffect(() => {
     if (!fetchLogs || !visible) return;
@@ -47,13 +51,56 @@ const AdvancedView = React.memo(function AdvancedView({
     async function load() {
       try {
         const origin = apiOrigin || (typeof window !== "undefined" ? window.location.origin : "http://localhost:3000");
-        const res = await fetch(`${origin}/api/logs`);
-        if (!res.ok || cancelled) return;
-        const data: LogEntry[] = await res.json();
-        const signature = data.length ? `${data.length}-${data[data.length - 1]?.ts}` : "0";
-        if (signature === lastLogSignature.current) return;
-        lastLogSignature.current = signature;
-        setLogs(data);
+        const [logRes, toolRes, stateRes] = await Promise.all([
+          fetch(`${origin}/api/logs`),
+          fetch(`${origin}/api/tool-calls`),
+          fetch(`${origin}/api/state-changes`),
+        ]);
+
+        if (cancelled) return;
+
+        if (logRes.ok) {
+          const data: LogEntry[] = await logRes.json();
+          const signature = data.length ? `${data.length}-${data[data.length - 1]?.ts}` : "0";
+          if (signature !== lastLogSignature.current) {
+            lastLogSignature.current = signature;
+            setLogs(data);
+          }
+        }
+
+        if (toolRes.ok) {
+          const payload = await toolRes.json();
+          const rawCalls = Array.isArray(payload?.calls) ? payload.calls : [];
+          const calls: ToolCall[] = rawCalls.map((c: any) => ({
+            ts: c.timestamp,
+            name: c.toolName,
+            args: c.args ?? undefined,
+          }));
+          const signature = calls.length ? `${calls.length}-${calls[calls.length - 1]?.ts}` : "0";
+          if (signature !== lastToolCallSignature.current) {
+            lastToolCallSignature.current = signature;
+            setFetchedToolCalls(calls);
+          }
+        }
+
+        if (stateRes.ok) {
+          const payload = await stateRes.json();
+          const rawEvents = Array.isArray(payload?.events) ? payload.events : [];
+          const events: StateChange[] = rawEvents.map((e: any) => ({
+            ts: e.timestamp,
+            key: e.eventType,
+            value: {
+              taskId: e.taskId,
+              agentId: e.agentId,
+              data: e.data,
+            },
+          }));
+          const signature = events.length ? `${events.length}-${events[events.length - 1]?.ts}` : "0";
+          if (signature !== lastStateChangeSignature.current) {
+            lastStateChangeSignature.current = signature;
+            setFetchedStateChanges(events);
+          }
+        }
       } catch {
         // ignore transient errors
       }
@@ -65,6 +112,9 @@ const AdvancedView = React.memo(function AdvancedView({
       if (timer) clearInterval(timer);
     };
   }, [fetchLogs, intervalMs, apiOrigin, visible]);
+
+  const effectiveToolCalls = toolCalls.length > 0 ? toolCalls : fetchedToolCalls;
+  const effectiveStateChanges = stateChanges.length > 0 ? stateChanges : fetchedStateChanges;
 
   const styles = useMemo(() => ({
     overlay: {
@@ -153,8 +203,8 @@ const AdvancedView = React.memo(function AdvancedView({
               </div>
               <div style={styles.section}>
                 <div style={styles.sectionTitle}>Tool calls</div>
-                {toolCalls.length === 0 && <div style={styles.line}>—</div>}
-                {toolCalls.map((t, i) => (
+                {effectiveToolCalls.length === 0 && <div style={styles.line}>—</div>}
+                {effectiveToolCalls.map((t, i) => (
                   <motion.div key={i} style={styles.line} whileHover={{ x: 2 }}>
                     [{t.ts ? new Date(t.ts).toLocaleTimeString() : ""}] {t.name}
                   </motion.div>
@@ -162,8 +212,8 @@ const AdvancedView = React.memo(function AdvancedView({
               </div>
               <div style={styles.section}>
                 <div style={styles.sectionTitle}>State changes</div>
-                {stateChanges.length === 0 && <div style={styles.line}>—</div>}
-                {stateChanges.map((s, i) => (
+                {effectiveStateChanges.length === 0 && <div style={styles.line}>—</div>}
+                {effectiveStateChanges.map((s, i) => (
                   <motion.div key={i} style={styles.line} whileHover={{ x: 2 }}>
                     [{s.ts ? new Date(s.ts).toLocaleTimeString() : ""}] {s.key}: {JSON.stringify(s.value)}
                   </motion.div>

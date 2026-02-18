@@ -369,6 +369,11 @@ export class TaskExecutor {
     const completed = new Set<string>();
     const outputs: Record<string, any> = {};
     const failures: Array<{ taskId: string; error: string }> = [];
+    const maxParallelNodesRaw =
+      task.metadata && typeof task.metadata.maxParallelNodes === 'number'
+        ? Math.floor(task.metadata.maxParallelNodes)
+        : 0;
+    const maxParallelNodes = maxParallelNodesRaw > 0 ? maxParallelNodesRaw : 0;
 
     while (completed.size < nodeMap.size) {
       throwIfAborted(options?.signal);
@@ -383,7 +388,9 @@ export class TaskExecutor {
 
       const variables = contextManager.getVariables(context.taskId);
 
-      const runPromises = ready.map(async ([nodeId, node]) => {
+      const readyToRun = maxParallelNodes > 0 ? ready.slice(0, maxParallelNodes) : ready;
+
+      const runPromises = readyToRun.map(async ([nodeId, node]) => {
         options?.onNodeEvent?.({ taskId: context.taskId, nodeId, status: 'running' });
         const nodeTask = {
           ...node.task,

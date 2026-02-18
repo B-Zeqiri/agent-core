@@ -125,6 +125,9 @@ Always prioritize accuracy and objectivity. Present conflicting viewpoints fairl
           const result = await modelAdapter.call(systemPrompt, userMessage, {
             ...parsed.overrides,
             signal: ctx?.signal,
+            taskId: ctx?.taskId,
+            agentId: this.agentId,
+            agentVersion: this.agent.metadata?.version as string | undefined,
           });
           return JSON.stringify({
             ok: true,
@@ -213,6 +216,9 @@ Focus on practical, actionable advice. Consider security and performance implica
           const result = await modelAdapter.call(systemPrompt, userMessage, {
             ...parsed.overrides,
             signal: ctx?.signal,
+            taskId: ctx?.taskId,
+            agentId: this.agentId,
+            agentVersion: this.agent.metadata?.version as string | undefined,
           });
           return JSON.stringify({
             ok: true,

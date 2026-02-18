@@ -108,7 +108,6 @@ npm run test:tools
 npm run test:scheduler
 npm run test:ipc
 npm run test:observability
-npm run test:ui
 ```
 
 ## Documentation

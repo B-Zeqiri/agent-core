@@ -331,14 +331,13 @@ curl http://localhost:3000/dashboard/health
 - `src/ui/wsServer.ts` (183 lines)
 - `src/ui/api.ts` (145 lines)
 - `src/ui/public/index.html` (400+ lines)
-- `src/ui/test.ts` (189 lines)
 
 **Modified Files**:
 - `src/observability/logger.ts`: Fixed count=0 handling in 4 methods
 - `src/observability/tracer.ts`: Fixed count=0 handling in 6 methods
 - `src/kernel/kernel.ts`: Added getRegistry() public method
 - `src/observability/monitor.ts`: Updated to use new kernel methods
-- `package.json`: Added ws dependency and test:ui script
+- `package.json`: Added ws dependency
 
 ## Summary
 

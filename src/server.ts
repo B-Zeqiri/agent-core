@@ -1,8 +1,8 @@
-import dotenv from "dotenv";
 import express from "express";
 import { v4 as uuidv4 } from "uuid";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import { Kernel } from "./kernel/kernel";
 import { Orchestrator } from "./orchestration/orchestrator";
 import { Agent } from "./kernel/types";
@@ -15,7 +15,20 @@ import { WebDevAgent } from "./agents/webDevAgent";
 import { ResearchAgent, SystemAgent } from "./agents/researchAndSystemAgent";
 import { resultStore } from "./storage/resultStore";
 import { eventBus } from "./events/eventBus";
-import { taskStore, TaskRecord } from "./storage/taskStore";
+import { taskStore, TaskRecord, TaskQuery } from "./storage/taskStore";
+import { runtimeTaskStore, RuntimeTaskRecord } from "./storage/runtimeTaskStore";
+import { getPersistenceDriver, getPostgresUrl } from "./storage/persistenceDriver";
+import { getSqliteDbPath } from "./storage/sqliteDb";
+import { auditLogger } from "./security/auditLogger";
+import { auditStore } from "./storage/auditStore";
+import { replayStore, ReplayEventRecord } from "./storage/replayStore";
+import { logStore } from "./storage/logStore";
+import { toolCallStore } from "./storage/toolCallStore";
+import { stateChangeStore } from "./storage/stateChangeStore";
+import { schedulePersistenceMaintenance } from "./storage/persistenceMaintenance";
+import { runPgQuery } from "./storage/postgresDb";
+import { getTaskQueue } from "./queue/taskQueue";
+import { QueuedTaskPayload } from "./queue/types";
 
 // Phase 2: Plugin agents (developer contract)
 import { registerDefaultTools } from "./plugins/defaultTools";
@@ -29,7 +42,21 @@ import { startPluginWatcher } from "./plugins/pluginWatcher";
 // Buffer plugin agents for the UI list (declared later in this file)
 const pluginAgentsForUi: Array<{ id: string; name: string }> = [];
 
-dotenv.config();
+const persistenceDriver = getPersistenceDriver();
+const usePostgres = persistenceDriver === "postgres";
+if (persistenceDriver === "postgres") {
+  try {
+    const url = new URL(getPostgresUrl());
+    const dbName = url.pathname.replace(/^\//, "");
+    const port = url.port || "5432";
+    console.log(`[storage] Persistence driver: postgres (${url.hostname}:${port}/${dbName})`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[storage] Persistence driver: postgres (unavailable - ${message})`);
+  }
+} else {
+  console.log(`[storage] Persistence driver: sqlite (${getSqliteDbPath()})`);
+}
 
 // --- System Mode (Assist, Power, Autonomous) ---
 type SystemMode = 'assist' | 'power' | 'autonomous';
@@ -38,7 +65,83 @@ let systemMode: SystemMode = 'assist';
 const app = express();
 app.use(express.json());
 
+process.on("uncaughtException", (error) => {
+  console.error("[boot] Uncaught exception:", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[boot] Unhandled rejection:", reason);
+});
+
 const PORT = Number(process.env.PORT) || 3000;
+const WORKER_ONLY = (() => {
+  const raw = process.env.WORKER_ONLY;
+  if (raw == null || raw.trim() === "") return false;
+  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+})();
+
+console.log(
+  `[boot] PORT=${PORT} WORKER_ONLY=${WORKER_ONLY} ` +
+    `QUEUE_DRIVER=${String(process.env.QUEUE_DRIVER || "local").toLowerCase()} ` +
+    `QUEUE_START_WORKER=${(() => {
+      const raw = process.env.QUEUE_START_WORKER;
+      if (raw == null || raw.trim() === "") {
+        return String(process.env.QUEUE_DRIVER || "local").toLowerCase() === "local";
+      }
+      return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+    })()}`
+);
+const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
+const QUEUE_DRIVER = String(process.env.QUEUE_DRIVER || "local").toLowerCase();
+const QUEUE_START_WORKER = (() => {
+  const raw = process.env.QUEUE_START_WORKER;
+  if (raw == null || raw.trim() === "") {
+    return QUEUE_DRIVER === "local";
+  }
+  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+})();
+const taskQueue = getTaskQueue();
+const MULTI_AGENT_MAX_NODES = (() => {
+  const raw = Number(process.env.MULTI_AGENT_MAX_NODES);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return 10;
+})();
+const TASK_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.TASK_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return 3600000;
+})();
+const WORKER_LEASE_MS = (() => {
+  const raw = process.env.WORKER_LEASE_MS;
+  if (raw == null || raw.trim() === "") return TASK_TIMEOUT_MS;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.floor(value) : TASK_TIMEOUT_MS;
+})();
+const MULTI_AGENT_NODE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.MULTI_AGENT_NODE_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return TASK_TIMEOUT_MS;
+})();
+const MULTI_AGENT_MAX_WORKFLOW_MS = (() => {
+  const raw = Number(process.env.MULTI_AGENT_MAX_WORKFLOW_MS);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return 10800000;
+})();
+const MULTI_AGENT_MAX_PARALLEL_NODES = (() => {
+  const raw = Number(process.env.MULTI_AGENT_MAX_PARALLEL_NODES);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return 3;
+})();
+const WORKFLOW_STATE_TTL_MS = (() => {
+  const raw = Number(process.env.WORKFLOW_STATE_TTL_MS);
+  if (Number.isFinite(raw) && raw >= 0) return Math.floor(raw);
+  return 10 * 60 * 1000;
+})();
+let taskSubmissionsPaused = (() => {
+  const raw = process.env.TASK_SUBMISSIONS_PAUSED;
+  if (raw == null || raw.trim() === "") return false;
+  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+})();
 
 // Get current system mode
 app.get('/api/system-mode', (_req, res) => {
@@ -55,6 +158,22 @@ app.post('/api/system-mode', (req, res) => {
   } else {
     res.status(400).json({ ok: false, error: 'Invalid mode' });
   }
+});
+
+app.get("/api/tasks/pause", (_req, res) => {
+  res.json({ paused: taskSubmissionsPaused });
+});
+
+app.post("/api/tasks/pause", (_req, res) => {
+  taskSubmissionsPaused = true;
+  addLog("info", "Task submissions paused");
+  res.json({ paused: taskSubmissionsPaused });
+});
+
+app.post("/api/tasks/resume", (_req, res) => {
+  taskSubmissionsPaused = false;
+  addLog("info", "Task submissions resumed");
+  res.json({ paused: taskSubmissionsPaused });
 });
 
 // Model configuration (Phase 4)
@@ -109,7 +228,7 @@ app.get('/api/models', (_req, res) => {
 
 // Initialize Kernel and Orchestrator
 const kernel = new Kernel();
-const orchestrator = new Orchestrator({ maxConcurrentTasks: 10, defaultTimeout: 600000 });
+const orchestrator = new Orchestrator({ maxConcurrentTasks: 10, defaultTimeout: TASK_TIMEOUT_MS });
 
 // Initialize Model Adapter (config-driven)
 // - MODEL_PROVIDER=gpt4all|ollama|openai
@@ -332,6 +451,28 @@ interface WorkflowState {
 
 const workflowStateByTaskId = new Map<string, WorkflowState>();
 const workflowDefinitionByTaskId = new Map<string, any>();
+const workflowCleanupTimers = new Map<string, NodeJS.Timeout>();
+
+function clearWorkflowState(taskId: string) {
+  const existing = workflowCleanupTimers.get(taskId);
+  if (existing) {
+    clearTimeout(existing);
+    workflowCleanupTimers.delete(taskId);
+  }
+  workflowStateByTaskId.delete(taskId);
+  workflowDefinitionByTaskId.delete(taskId);
+}
+
+function scheduleWorkflowCleanup(taskId: string) {
+  clearWorkflowState(taskId);
+  if (WORKFLOW_STATE_TTL_MS === 0) {
+    return;
+  }
+  const timer = setTimeout(() => {
+    clearWorkflowState(taskId);
+  }, WORKFLOW_STATE_TTL_MS);
+  workflowCleanupTimers.set(taskId, timer);
+}
 
 function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
   if (raw === true) {
@@ -340,7 +481,7 @@ function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
       planner: 'rule',
       mode: 'force',
       failurePolicy: { defaultAction: 'continue', retries: 0 },
-      nodeTimeoutMs: 600000,
+      nodeTimeoutMs: MULTI_AGENT_NODE_TIMEOUT_MS,
     };
   }
 
@@ -350,7 +491,7 @@ function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
       planner: 'none',
       mode: 'force',
       failurePolicy: { defaultAction: 'stop', retries: 0 },
-      nodeTimeoutMs: 600000,
+      nodeTimeoutMs: MULTI_AGENT_NODE_TIMEOUT_MS,
     };
   }
 
@@ -365,7 +506,7 @@ function normalizeMultiAgentConfig(raw: any): MultiAgentConfig {
   const nodeTimeoutMs =
     typeof raw.nodeTimeoutMs === 'number' && Number.isFinite(raw.nodeTimeoutMs) && raw.nodeTimeoutMs > 0
       ? Math.floor(raw.nodeTimeoutMs)
-      : 600000;
+      : MULTI_AGENT_NODE_TIMEOUT_MS;
 
   const graph = raw.graph && Array.isArray(raw.graph.nodes) ? (raw.graph as MultiAgentGraphSpec) : undefined;
 
@@ -502,6 +643,75 @@ function buildRuleGraph(
   return buildGraphFromSpec({ nodes: finalNodes }, baseInput, policy, finalAgentId, nodeTimeoutMs);
 }
 
+function splitInputIntoObjectives(input: string): string[] {
+  const normalized = String(input || '').replace(/\r\n/g, '\n');
+  const parts = normalized
+    .split(/(?:\n+|\.|;|,|\s+and then\s+|\s+then\s+|\s+after that\s+|\s+next\s+|\s+finally\s+|\s+first\s+|\s+second\s+|\s+third\s+|\s+also\s+|\s+plus\s+|\s+additionally\s+|\s+moreover\s+|\s+lastly\s+)/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const filtered = parts.filter((part) => part.length >= 6);
+  return filtered.length >= 2 ? filtered : [];
+}
+
+function mapObjectiveToAgentId(objective: string, fallbackAgentId?: string): string {
+  const { wantsResearch, wantsBuild, wantsReview } = inferMultiAgentIntent(objective);
+
+  if (wantsResearch && !wantsBuild && !wantsReview) return 'research-agent';
+  if (wantsBuild && !wantsResearch && !wantsReview) return 'web-dev-agent';
+  if (wantsReview && !wantsResearch && !wantsBuild) return 'system-agent';
+
+  return fallbackAgentId && fallbackAgentId.trim().length > 0 ? fallbackAgentId : 'web-dev-agent';
+}
+
+function buildAutoRuleNodes(input: string, fallbackAgentId?: string) {
+  const objectives = splitInputIntoObjectives(input);
+  if (objectives.length === 0) {
+    return { nodes: [] as MultiAgentGraphSpec['nodes'], plannedCount: 0, truncatedCount: 0 };
+  }
+
+  const plannedCount = objectives.length;
+  const maxNodes = Math.max(1, MULTI_AGENT_MAX_NODES);
+  const trimmed = objectives.slice(0, maxNodes);
+  const truncatedCount = Math.max(0, plannedCount - trimmed.length);
+
+  const nodes: MultiAgentGraphSpec['nodes'] = trimmed.map((objective, index) => ({
+    id: `step-${index + 1}`,
+    agentId: mapObjectiveToAgentId(objective, fallbackAgentId),
+    objective,
+  }));
+
+  return { nodes, plannedCount, truncatedCount };
+}
+
+function buildRuleGraphPlan(
+  input: string,
+  baseInput: Record<string, any>,
+  policy: MultiAgentFailurePolicy,
+  finalAgentId?: string,
+  nodeTimeoutMs?: number
+): { graph: TaskGraph; truncationNote?: string } {
+  const autoPlan = buildAutoRuleNodes(input, finalAgentId);
+  if (autoPlan.nodes.length > 0) {
+    const finalNodes = autoPlan.nodes.map((node, index) => ({
+      ...node,
+      dependsOn: index > 0 ? [autoPlan.nodes[index - 1].id] : [],
+    }));
+
+    const truncationNote =
+      autoPlan.truncatedCount > 0
+        ? `Planned ${autoPlan.plannedCount} steps, truncated to ${autoPlan.plannedCount - autoPlan.truncatedCount} due to MULTI_AGENT_MAX_NODES.`
+        : undefined;
+
+    return {
+      graph: buildGraphFromSpec({ nodes: finalNodes }, baseInput, policy, finalAgentId, nodeTimeoutMs),
+      truncationNote,
+    };
+  }
+
+  return { graph: buildRuleGraph(input, baseInput, policy, finalAgentId, nodeTimeoutMs) };
+}
+
 function getPlannedAgentsForMultiAgent(
   input: string,
   config: MultiAgentConfig,
@@ -516,10 +726,19 @@ function getPlannedAgentsForMultiAgent(
       }
     }
   } else {
-    const { wantsResearch, wantsBuild, wantsReview } = inferMultiAgentIntent(input);
-    if (wantsResearch) planned.push('research-agent');
-    if (wantsBuild || planned.length === 0) planned.push('web-dev-agent');
-    if (wantsReview) planned.push('system-agent');
+    const autoPlan = buildAutoRuleNodes(input, finalAgentId);
+    if (autoPlan.nodes.length > 0) {
+      for (const node of autoPlan.nodes) {
+        if (typeof node.agentId === 'string' && node.agentId.length > 0) {
+          planned.push(node.agentId);
+        }
+      }
+    } else {
+      const { wantsResearch, wantsBuild, wantsReview } = inferMultiAgentIntent(input);
+      if (wantsResearch) planned.push('research-agent');
+      if (wantsBuild || planned.length === 0) planned.push('web-dev-agent');
+      if (wantsReview) planned.push('system-agent');
+    }
   }
 
   if (finalAgentId && finalAgentId.trim().length > 0) {
@@ -569,11 +788,96 @@ for (const p of pluginAgentsForUi) {
 }
 
 const DATA_DIR = path.join(process.cwd(), '.data');
-const TASKS_FILE = path.join(DATA_DIR, 'tasks.json');
-const LOGS_FILE = path.join(DATA_DIR, 'logs.json');
 
 const tasks: Task[] = [];
 const logs: LogEntry[] = [];
+
+async function loadRuntimeTasks(): Promise<Array<RuntimeTaskRecord>> {
+  if (usePostgres) return runtimeTaskStore.loadAllAsync();
+  return runtimeTaskStore.loadAll();
+}
+
+async function saveRuntimeTasks(records: RuntimeTaskRecord[]): Promise<void> {
+  if (usePostgres) {
+    await runtimeTaskStore.saveAllAsync(records);
+    return;
+  }
+  runtimeTaskStore.saveAll(records);
+}
+
+async function loadStoredLogs(limit: number): Promise<LogEntry[]> {
+  if (usePostgres) {
+    return logStore.getLogsAsync({ limit });
+  }
+  return logStore.getLogs({ limit });
+}
+
+async function getTaskRecord(taskId: string): Promise<TaskRecord | null> {
+  if (usePostgres) return taskStore.getTaskAsync(taskId);
+  return taskStore.getTask(taskId);
+}
+
+async function updateTaskRecord(taskId: string, updates: Partial<TaskRecord>): Promise<TaskRecord | null> {
+  if (usePostgres) return taskStore.updateTaskAsync(taskId, updates);
+  return taskStore.updateTask(taskId, updates);
+}
+
+async function createTaskRecord(input: string, metadata?: Partial<TaskRecord>): Promise<TaskRecord> {
+  if (usePostgres) return taskStore.createTaskAsync(input, metadata);
+  return taskStore.createTask(input, metadata);
+}
+
+async function createRetryRecord(taskId: string, input?: string): Promise<TaskRecord | null> {
+  if (usePostgres) return taskStore.createRetryAsync(taskId, input);
+  return taskStore.createRetry(taskId, input);
+}
+
+async function rekeyTaskRecord(oldTaskId: string, newTaskId: string): Promise<TaskRecord | null> {
+  if (usePostgres) return taskStore.rekeyTaskAsync(oldTaskId, newTaskId);
+  return taskStore.rekeyTask(oldTaskId, newTaskId);
+}
+
+async function queryTaskRecords(filters?: TaskQuery): Promise<TaskRecord[]> {
+  if (usePostgres) return taskStore.queryAsync(filters);
+  return taskStore.query(filters);
+}
+
+async function getRetryChainRecords(taskId: string): Promise<TaskRecord[]> {
+  if (usePostgres) return taskStore.getRetryChainAsync(taskId);
+  return taskStore.getRetryChain(taskId);
+}
+
+async function getTaskStats(): Promise<{
+  total: number;
+  byStatus: Record<string, number>;
+  byAgent: Record<string, number>;
+  avgDuration: number;
+  successRate: number;
+  retryRate: number;
+}> {
+  if (usePostgres) return taskStore.getStatsAsync();
+  return taskStore.getStats();
+}
+
+async function deleteOldTasks(daysOld: number): Promise<number> {
+  if (usePostgres) return taskStore.deleteOlderThanAsync(daysOld);
+  return taskStore.deleteOlderThan(daysOld);
+}
+
+async function clearAllTasks(): Promise<number> {
+  if (usePostgres) return taskStore.clearAllAsync();
+  return taskStore.clearAll();
+}
+
+async function deleteTaskById(taskId: string): Promise<boolean> {
+  if (usePostgres) return taskStore.deleteTaskAsync(taskId);
+  return taskStore.deleteTask(taskId);
+}
+
+async function deleteByConversation(conversationId: string): Promise<number> {
+  if (usePostgres) return taskStore.deleteByConversationIdAsync(conversationId);
+  return taskStore.deleteByConversationId(conversationId);
+}
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -590,21 +894,17 @@ process.on('uncaughtException', (error) => {
 });
 
 // Load persisted data
-function loadPersistedData() {
+async function loadPersistedDataAsync() {
   try {
-    if (fs.existsSync(TASKS_FILE)) {
-      const taskData = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8'));
-      tasks.push(
-        ...taskData.map((t: any) => ({
-          ...t,
-          progress_messages: t.progress_messages || []
-        }))
-      );
-    }
-    if (fs.existsSync(LOGS_FILE)) {
-      const logData = JSON.parse(fs.readFileSync(LOGS_FILE, 'utf-8'));
-      logs.push(...logData);
-    }
+    const taskData = await loadRuntimeTasks();
+    tasks.push(
+      ...taskData.map((t: any) => ({
+        ...t,
+        progress_messages: t.progress_messages || [],
+      }))
+    );
+    const logData = await loadStoredLogs(500);
+    logs.push(...logData);
   } catch (err) {
     console.error('Error loading persisted data:', err);
   }
@@ -612,15 +912,21 @@ function loadPersistedData() {
 
 // Save data to files
 function saveData() {
+  if (usePostgres) {
+    void saveRuntimeTasks(tasks).catch((err) => {
+      console.error('Error saving data:', err);
+    });
+    return;
+  }
   try {
-    fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
-    fs.writeFileSync(LOGS_FILE, JSON.stringify(logs, null, 2));
+    runtimeTaskStore.saveAll(tasks);
   } catch (err) {
     console.error('Error saving data:', err);
   }
 }
 
-loadPersistedData();
+void loadPersistedDataAsync();
+schedulePersistenceMaintenance();
 
 function normalizeStaleTasksOnStartup() {
   const now = Date.now();
@@ -692,8 +998,181 @@ function registerTerminalTaskLogging() {
 
 registerTerminalTaskLogging();
 
+function getAgentVersion(agentId: string): string | undefined {
+  const agent = kernel.getAgent(agentId);
+  const version = agent?.metadata?.version;
+  return typeof version === "string" ? version : undefined;
+}
+
+function buildAgentVersionMap(agentIds: string[]): Record<string, string> {
+  const versions: Record<string, string> = {};
+  for (const agentId of agentIds) {
+    const version = getAgentVersion(agentId);
+    if (version) {
+      versions[agentId] = version;
+    }
+  }
+  return versions;
+}
+
+function logAgentVersionWarning(agentId: string): void {
+  auditLogger.log({
+    eventType: "agent-version-missing",
+    agentId,
+    details: { reason: "Missing agent metadata.version" },
+  });
+  console.warn(`[${agentId}] Missing agent metadata.version`);
+}
+
+function registerAuditEventLogging() {
+  eventBus.on("task.queued", (event) => {
+    auditLogger.log({
+      eventType: "task-event",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+  eventBus.on("task.started", (event) => {
+    auditLogger.log({
+      eventType: "task-event",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+  eventBus.on("task.completed", (event) => {
+    auditLogger.log({
+      eventType: "task-event",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+  eventBus.on("task.failed", (event) => {
+    auditLogger.log({
+      eventType: "task-event",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+  eventBus.on("task.cancelled", (event) => {
+    auditLogger.log({
+      eventType: "task-event",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+  eventBus.on("agent.registered", (event) => {
+    auditLogger.log({
+      eventType: "agent-lifecycle",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+  eventBus.on("agent.busy", (event) => {
+    auditLogger.log({
+      eventType: "agent-lifecycle",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+  eventBus.on("agent.idle", (event) => {
+    auditLogger.log({
+      eventType: "agent-lifecycle",
+      agentId: event.agentId,
+      taskId: event.taskId,
+      details: { type: event.type, data: event.data },
+    });
+  });
+}
+
+registerAuditEventLogging();
+
+function registerStateChangePersistence() {
+  const eventTypes = [
+    "task.queued",
+    "task.scheduled",
+    "task.started",
+    "task.step",
+    "task.progress",
+    "task.completed",
+    "task.failed",
+    "task.cancelled",
+    "tool.called",
+    "tool.completed",
+    "agent.registered",
+    "agent.busy",
+    "agent.idle",
+  ];
+
+  eventTypes.forEach((type) => {
+    eventBus.on(type as any, (event) => {
+      stateChangeStore.addEvent({
+        timestamp: event.timestamp,
+        eventType: event.type,
+        taskId: event.taskId,
+        agentId: event.agentId,
+        data: event.data,
+      });
+    });
+  });
+}
+
+registerStateChangePersistence();
+const queueWorkerState = { started: false };
+function startQueueWorker(): void {
+  if (queueWorkerState.started || !QUEUE_START_WORKER) return;
+  queueWorkerState.started = true;
+
+  taskQueue.startWorker(async (payload: QueuedTaskPayload) => {
+    const agentInfo = pickAgent(payload.selectedAgentId);
+    if (!agentInfo) {
+      console.error(`[queue] Agent ${payload.selectedAgentId} not found, skipping.`);
+      return;
+    }
+
+    let task = tasks.find((t) => t.id === payload.taskId);
+    if (!task) {
+      const stored = await getTaskRecord(payload.taskId);
+      const now = Date.now();
+      task = {
+        id: payload.taskId,
+        agent: agentInfo.name,
+        status: "queued",
+        startedAt: now,
+        progress: 0,
+        input: stored?.input ?? payload.input,
+        progress_messages: [],
+        generation: stored?.generation,
+        systemMode: stored?.systemMode,
+      };
+      tasks.push(task);
+    }
+
+    await executeTaskAsync(
+      payload.taskId,
+      task,
+      agentInfo,
+      payload.input,
+      payload.selectedAgentId,
+      payload.registeredTaskId,
+      payload.agentType,
+      payload.multiAgentConfig as MultiAgentConfig
+    );
+  });
+}
+
+startQueueWorker();
+
 function addLog(level: LogEntry["level"], message: string) {
-  logs.push({ ts: Date.now(), level, message });
+  const entry = { ts: Date.now(), level, message };
+  logs.push(entry);
+  logStore.addLog(entry);
   if (logs.length > 500) logs.shift();
   saveData();
 }
@@ -783,6 +1262,24 @@ function deriveCurrentStep(taskId: string): string | null {
   const task = tasks.find((t) => t.id === taskId);
   if (task && task.progress_messages.length > 0) {
     return task.progress_messages[task.progress_messages.length - 1].message;
+  }
+
+  return null;
+}
+
+function deriveReplayOutput(events: ReplayEventRecord[]): string | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.kind === "model" && event.output != null) {
+      return typeof event.output === "string" ? event.output : JSON.stringify(event.output);
+    }
+  }
+
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.kind === "tool" && event.output != null) {
+      return typeof event.output === "string" ? event.output : JSON.stringify(event.output);
+    }
   }
 
   return null;
@@ -953,9 +1450,24 @@ function clearCompletedTasks() {
   saveData();
 }
 
-function clearLogs() {
+async function clearLogsAsync(): Promise<void> {
   logs.length = 0;
+  if (usePostgres) {
+    await logStore.clearAsync();
+  } else {
+    logStore.clear();
+  }
   saveData();
+}
+
+async function getRecentLogsAsync(limit: number = 200): Promise<LogEntry[]> {
+  if (logs.length === 0) {
+    const stored = await loadStoredLogs(limit);
+    if (stored.length > 0) {
+      logs.push(...stored);
+    }
+  }
+  return logs.slice(-limit);
 }
 
 function toEnvelope(task: Task): TaskEnvelope {
@@ -995,12 +1507,19 @@ app.get("/api", (_req, res) => {
     name: "Agent Core API",
     endpoints: [
       "GET /api/status",
+      "GET /api/storage",
       "GET /api/agents",
       "GET /api/tasks",
       "GET /api/task/:id",
       "GET /api/task/:id/status",
       "GET /api/logs",
+      "GET /api/queue/status",
+      "GET /api/tool-calls",
+      "GET /api/state-changes",
+      "GET /api/tasks/pause",
       "POST /task",
+      "POST /api/tasks/pause",
+      "POST /api/tasks/resume",
       "POST /api/tasks/clear",
       "POST /api/logs/clear"
     ]
@@ -1016,8 +1535,8 @@ app.get("/tasks", (_req, res) => {
   res.json(sorted.map(toEnvelope));
 });
 
-app.get("/logs", (_req, res) => {
-  res.json(logs.slice(-200));
+app.get("/logs", async (_req, res) => {
+  res.json(await getRecentLogsAsync(200));
 });
 
 // Frontend pages removed: no /submit route
@@ -1027,6 +1546,42 @@ app.get("/api/status", (_req, res) => {
     res.json(getMetrics());
   } catch (err) {
     console.error("Error in /api/status:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/storage", async (_req, res) => {
+  const driver = getPersistenceDriver();
+  if (driver === "postgres") {
+    try {
+      const url = new URL(getPostgresUrl());
+      const port = url.port || "5432";
+      const dbName = url.pathname.replace(/^\//, "");
+      await runPgQuery("SELECT 1 AS ok");
+      return res.json({
+        driver,
+        connected: true,
+        postgres: { host: url.hostname, port, database: dbName },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return res.json({ driver, connected: false, error: message });
+    }
+  }
+
+  return res.json({
+    driver,
+    connected: true,
+    sqlite: { path: getSqliteDbPath() },
+  });
+});
+
+app.get("/api/queue/status", async (_req, res) => {
+  try {
+    const stats = await taskQueue.getStats();
+    res.json({ ok: true, stats });
+  } catch (err) {
+    console.error("Error in /api/queue/status:", err);
     res.status(500).json({ error: String(err) });
   }
 });
@@ -1194,7 +1749,7 @@ app.get("/api/task/:id/stream", (req, res) => {
 });
 
 // Cancel a running task
-app.post("/api/task/:id/cancel", (req, res) => {
+app.post("/api/task/:id/cancel", async (req, res) => {
   const task = tasks.find((t) => t.id === req.params.id);
   if (!task) {
     return res.status(404).json({ error: "Task not found" });
@@ -1217,7 +1772,7 @@ app.post("/api/task/:id/cancel", (req, res) => {
   abortPluginTask(task.id);
   
   // Update TaskStore with cancelled status
-  taskStore.updateTask(task.id, {
+  await updateTaskRecord(task.id, {
     status: 'cancelled',
     error: 'Task was cancelled by user',
     completedAt: task.endedAt,
@@ -1225,7 +1780,7 @@ app.post("/api/task/:id/cancel", (req, res) => {
   });
 
   // Emit cancellation event (Phase 3 observability)
-  const agentId = taskStore.getTask(task.id)?.agent || 'unknown';
+  const agentId = (await getTaskRecord(task.id))?.agent || 'unknown';
   eventBus.emit('task.cancelled', task.id, agentId, { reason: 'Task was cancelled by user' }).catch(() => {});
   
   emitProgress(task.id, "Task cancelled by user");
@@ -1236,11 +1791,11 @@ app.post("/api/task/:id/cancel", (req, res) => {
 });
 
 // Task Details (Phase 3)
-app.get('/api/task/:id/details', (req, res) => {
+app.get('/api/task/:id/details', async (req, res) => {
   const taskId = req.params.id;
 
   const task = tasks.find((t) => t.id === taskId);
-  const record = taskStore.getTask(taskId);
+  const record = await getTaskRecord(taskId);
   if (!task && !record) {
     return res.status(404).json({ ok: false, error: 'Task not found' });
   }
@@ -1254,12 +1809,16 @@ app.get('/api/task/:id/details', (req, res) => {
   const endedAt = task?.endedAt ?? record!.completedAt;
   const durationMs = task?.durationMs ?? record!.durationMs ?? (endedAt ? endedAt - startedAt : Date.now() - startedAt);
 
+  const multiAgentEnabled = record?.multiAgentEnabled === true;
+  const allowWorkflow = multiAgentEnabled;
+
   res.json({
     ok: true,
     taskId,
     status,
     agentId: record?.agent,
     agentName: task?.agent,
+    multiAgentEnabled,
     startedAt,
     endedAt,
     durationMs,
@@ -1267,8 +1826,8 @@ app.get('/api/task/:id/details', (req, res) => {
     currentStep: deriveCurrentStep(taskId),
     cancelable,
     logs: buildTaskLogs(taskId),
-    workflow: workflowDefinitionByTaskId.get(taskId) ?? null,
-    graph: workflowStateByTaskId.get(taskId) ?? null,
+    workflow: allowWorkflow ? workflowDefinitionByTaskId.get(taskId) ?? null : null,
+    graph: allowWorkflow ? workflowStateByTaskId.get(taskId) ?? null : null,
   });
 });
 
@@ -1709,8 +2268,8 @@ app.get("/monitor", (_req, res) => {
   res.send(html);
 });
 
-app.get("/api/logs", (_req, res) => {
-  res.json(logs.slice(-200));
+app.get("/api/logs", async (_req, res) => {
+  res.json(await getRecentLogsAsync(200));
 });
 
 app.post("/api/tasks/clear", (_req, res) => {
@@ -1718,8 +2277,8 @@ app.post("/api/tasks/clear", (_req, res) => {
   res.json({ ok: true, remaining: tasks.length });
 });
 
-app.post("/api/logs/clear", (_req, res) => {
-  clearLogs();
+app.post("/api/logs/clear", async (_req, res) => {
+  await clearLogsAsync();
   res.json({ ok: true });
 });
 
@@ -1728,6 +2287,13 @@ app.post("/task", async (req, res) => {
   const providedTaskId = req.body?.taskId;
   const id = providedTaskId || uuidv4(); // Reuse task ID if provided
   const manuallySelected = req.body?.manuallySelected === true; // Check if manually selected
+
+  if (taskSubmissionsPaused) {
+    return res.status(503).json({
+      status: "failed",
+      reason: "Task submissions are paused",
+    });
+  }
   
   try {
     // If the client is attempting to reuse a taskId, ensure the old run is not still active.
@@ -1798,7 +2364,7 @@ app.post("/task", async (req, res) => {
       input,
       agentType,
       priority: 'normal',
-      timeout: 600000,
+      timeout: TASK_TIMEOUT_MS,
       metadata: { clientIP: req.ip, timestamp: Date.now(), systemMode: reqSystemMode },
     });
 
@@ -1814,7 +2380,7 @@ app.post("/task", async (req, res) => {
       input,
       agentType,
       priority: 'normal',
-      timeout: 600000,
+      timeout: TASK_TIMEOUT_MS,
       // systemMode is not part of TaskRequest, only store in TaskRecord
     });
 
@@ -1852,6 +2418,11 @@ app.post("/task", async (req, res) => {
       logLayer(id, `Layer 4/9: Kernel Scheduler - Selected ${selectedAgentId} ✓`);
     }
 
+    const selectedAgentVersion = getAgentVersion(selectedAgentId);
+    if (!selectedAgentVersion) {
+      logAgentVersionWarning(selectedAgentId);
+    }
+
     const multiAgentReason = multiAgentConfig.enabled
       ? multiAgentConfig.mode === 'auto'
         ? `Auto workflow: ${isMultiAgent ? 'multi-agent' : 'single-agent'} (planner: ${multiAgentConfig.planner}; defaultAction: ${multiAgentConfig.failurePolicy.defaultAction || 'stop'}; retries: ${multiAgentConfig.failurePolicy.retries || 0})`
@@ -1861,10 +2432,13 @@ app.post("/task", async (req, res) => {
     // Create or update persistent task record with agent decision tracking
     let registeredTaskId = id; // Default to current ID
     if (providedTaskId) {
+      clearWorkflowState(id);
+
       // Update existing task with new agent/status and input (for edited retries)
-      taskStore.updateTask(id, {
+      await updateTaskRecord(id, {
         input,
         agent: selectedAgentId,
+        agentVersion: selectedAgentVersion,
         status: 'pending',
         generation,
         agentSelectionReason: manuallySelected
@@ -1874,13 +2448,15 @@ app.post("/task", async (req, res) => {
         manuallySelected: manuallySelected,
         systemMode: reqSystemMode,
         multiAgentEnabled: isMultiAgent,
+        involvedAgents: undefined,
       });
       console.log(`[${id}] Task updated in TaskStore (retry/different agent)${manuallySelected ? ' - manually selected' : ''}`);
     } else {
       // Create new task
-      const persistentTask = taskStore.createTask(input, {
+      const persistentTask = await createTaskRecord(input, {
         id, // Use same ID for consistency
         agent: selectedAgentId,
+        agentVersion: selectedAgentVersion,
         generation,
         agentSelectionReason: manuallySelected 
           ? `Manually selected: ${selectedAgentId}`
@@ -1899,7 +2475,10 @@ app.post("/task", async (req, res) => {
     if (isMultiAgent) {
       const plannedAgents = getPlannedAgentsForMultiAgent(input, multiAgentConfig, selectedAgentId);
       if (plannedAgents.length > 1) {
-        taskStore.updateTask(id, { involvedAgents: plannedAgents });
+        await updateTaskRecord(id, {
+          involvedAgents: plannedAgents,
+          involvedAgentVersions: buildAgentVersionMap(plannedAgents),
+        });
       }
     }
 
@@ -1952,11 +2531,26 @@ app.post("/task", async (req, res) => {
     // Respond immediately (202 Accepted) with queued status for UI and orchestration chaining
     res.status(202).json({ taskId: id, status: "queued" });
 
-    // Execute asynchronously through full 9-layer pipeline
-    setImmediate(() => {
-      executeTaskAsync(id, task, agent, input, selectedAgentId, registeredTaskId, agentType, multiAgentConfig).catch((err) => {
-        console.error(`[${id}] Uncaught error in executeTaskAsync:`, err);
-        fs.appendFileSync(path.join(DATA_DIR, 'error.log'), `[${id}] Uncaught: ${err}\n`);
+    // Execute asynchronously through queue (worker or local adapter)
+    const payload: QueuedTaskPayload = {
+      taskId: id,
+      input,
+      selectedAgentId,
+      registeredTaskId,
+      agentType,
+      multiAgentConfig,
+    };
+
+    taskQueue.enqueue(payload).catch((err) => {
+      console.error(`[${id}] Queue enqueue failed:`, err);
+      fs.appendFileSync(path.join(DATA_DIR, 'error.log'), `[${id}] Queue enqueue failed: ${err}\n`);
+
+      // Fallback to local execution if queueing fails.
+      setImmediate(() => {
+        executeTaskAsync(id, task, agent, input, selectedAgentId, registeredTaskId, agentType, multiAgentConfig).catch((fallbackErr) => {
+          console.error(`[${id}] Uncaught error in executeTaskAsync:`, fallbackErr);
+          fs.appendFileSync(path.join(DATA_DIR, 'error.log'), `[${id}] Uncaught: ${fallbackErr}\n`);
+        });
       });
     });
 
@@ -1982,6 +2576,7 @@ async function executeTaskAsync(
 
   const multiAgent = resolveMultiAgentDecision(input, multiAgentConfig);
   let graph: TaskGraph | undefined;
+  let truncationNote: string | undefined;
 
   try {
     // Check if task was cancelled before starting
@@ -2010,11 +2605,10 @@ async function executeTaskAsync(
     await eventBus.emit('task.step', id, selectedAgentId, { step: 'orchestrator.create-workflow' });
 
     // Conversation context: use TaskStore conversationId to pull prior completed turns.
-    const storeRecord = taskStore.getTask(id);
+    const storeRecord = await getTaskRecord(id);
     const conversationId = storeRecord?.conversationId;
     const historyTurns = conversationId
-      ? taskStore
-          .query({ sortBy: 'startedAt', sortOrder: 'asc' })
+      ? (await queryTaskRecords({ sortBy: 'startedAt', sortOrder: 'asc' }))
           .filter((t) => t.conversationId === conversationId)
           .filter((t) => t.id !== id)
           .filter((t) => t.status === 'completed')
@@ -2038,23 +2632,29 @@ async function executeTaskAsync(
       ...(task.systemMode ? { systemMode: task.systemMode } : {}),
     };
 
-    graph = multiAgent
-      ? (multiAgentConfig.graph
-          ? buildGraphFromSpec(
-              multiAgentConfig.graph,
-              baseInput,
-              multiAgentConfig.failurePolicy,
-              selectedAgentId,
-              multiAgentConfig.nodeTimeoutMs
-            )
-          : buildRuleGraph(
-              input,
-              baseInput,
-              multiAgentConfig.failurePolicy,
-              selectedAgentId,
-              multiAgentConfig.nodeTimeoutMs
-            ))
-      : undefined;
+    if (multiAgent) {
+      if (multiAgentConfig.graph) {
+        graph = buildGraphFromSpec(
+          multiAgentConfig.graph,
+          baseInput,
+          multiAgentConfig.failurePolicy,
+          selectedAgentId,
+          multiAgentConfig.nodeTimeoutMs
+        );
+      } else {
+        const plan = buildRuleGraphPlan(
+          input,
+          baseInput,
+          multiAgentConfig.failurePolicy,
+          selectedAgentId,
+          multiAgentConfig.nodeTimeoutMs
+        );
+        graph = plan.graph;
+        truncationNote = plan.truncationNote;
+      }
+    } else {
+      graph = undefined;
+    }
 
     const plannedAgents = graph?.nodes
       ? Array.from(
@@ -2067,7 +2667,7 @@ async function executeTaskAsync(
       : undefined;
 
     if (plannedAgents && plannedAgents.length > 1) {
-      taskStore.updateTask(id, { involvedAgents: plannedAgents });
+      await updateTaskRecord(id, { involvedAgents: plannedAgents });
     }
 
     if (graph) {
@@ -2081,6 +2681,14 @@ async function executeTaskAsync(
       workflowStateByTaskId.set(id, { nodes: stateNodes });
     }
 
+    const graphNodeCount = graph?.nodes?.length || 0;
+    const multiAgentWorkflowTimeoutMs = multiAgent
+      ? Math.min(
+          MULTI_AGENT_MAX_WORKFLOW_MS,
+          multiAgentConfig.nodeTimeoutMs * Math.max(1, graphNodeCount)
+        )
+      : TASK_TIMEOUT_MS;
+
     // Create orchestration task (atomic or multi-agent graph)
     const orchestrationTask: OrchestrationTask = multiAgent
       ? {
@@ -2091,7 +2699,8 @@ async function executeTaskAsync(
           agentId: selectedAgentId,
           input: baseInput,
           graph,
-          timeout: 600000,
+          timeout: multiAgentWorkflowTimeoutMs,
+          metadata: { maxParallelNodes: MULTI_AGENT_MAX_PARALLEL_NODES },
         }
       : {
           id: `orchestration-${id}`,
@@ -2100,7 +2709,8 @@ async function executeTaskAsync(
           description: input,
           agentId: selectedAgentId,
           input: baseInput,
-          timeout: 600000,
+          timeout: multiAgentWorkflowTimeoutMs,
+          metadata: { maxParallelNodes: MULTI_AGENT_MAX_PARALLEL_NODES },
         };
 
     // Layer 3: Orchestrator - explicit workflow definition
@@ -2114,7 +2724,7 @@ async function executeTaskAsync(
             dependsOn: node.dependsOn || [],
           })),
           constraints: {
-            maxTime: 60,
+            maxTime: Math.max(60, Math.ceil(multiAgentWorkflowTimeoutMs / 1000)),
             model: 'local',
             allowPartialFailures: true,
             nodeTimeoutMs: multiAgentConfig.nodeTimeoutMs,
@@ -2127,7 +2737,7 @@ async function executeTaskAsync(
             { agent: agentType || selectedAgentId, action: agentType === 'research' ? 'research' : 'execute' }
           ],
           constraints: {
-            maxTime: 60,
+            maxTime: Math.max(60, Math.ceil(multiAgentWorkflowTimeoutMs / 1000)),
             model: 'local'
           }
         };
@@ -2191,6 +2801,15 @@ async function executeTaskAsync(
       return;
     }
 
+    if (execution.status === 'cancelled') {
+      throw new Error('Workflow execution cancelled');
+    }
+
+    if (execution.status === 'failed') {
+      const failureMessage = execution.error || execution.result?.error || 'Workflow execution failed';
+      throw new Error(failureMessage);
+    }
+
     // Extract + normalize output (Phase 3 deterministic AgentResult)
     const multiAgentPayload = multiAgent ? extractMultiAgentOutput(execution.result?.output) : null;
     const rawOutput = multiAgent
@@ -2208,6 +2827,10 @@ async function executeTaskAsync(
         .map((f) => `- ${f.taskId}: ${f.error}`)
         .join('\n');
       output = `${output}\n\nPartial failures:\n${failureLines}`;
+    }
+
+    if (truncationNote) {
+      output = `${output}\n\nNote: ${truncationNote}`;
     }
 
     task.progress = 75;
@@ -2249,7 +2872,7 @@ async function executeTaskAsync(
       : undefined;
 
     // Update persistent task record with completion
-    taskStore.updateTask(id, {
+    await updateTaskRecord(id, {
       status: 'completed',
       output,
       rawOutput: normalized.rawOutput,
@@ -2257,6 +2880,7 @@ async function executeTaskAsync(
       involvedAgents,
       messages: task.progress_messages.map(m => m.message),
       progress: 100,
+      leaseExpiresAt: null,
     });
 
     task.progress = 100;
@@ -2270,6 +2894,8 @@ async function executeTaskAsync(
       durationMs: task.durationMs,
       model: 'gpt4all',
     });
+
+    scheduleWorkflowCleanup(id);
 
     console.log(`[${id}] ✓ All 9 layers completed successfully`);
   } catch (err) {
@@ -2303,11 +2929,12 @@ async function executeTaskAsync(
       : undefined;
 
     // Update persistent task record with failure
-    taskStore.updateTask(id, {
+    await updateTaskRecord(id, {
       status: 'failed',
       error: message,
       involvedAgents: failedInvolvedAgents,
       messages: task.progress_messages.map(m => m.message),
+      leaseExpiresAt: null,
     });
 
     // Update registry with failure
@@ -2319,6 +2946,8 @@ async function executeTaskAsync(
     } catch (eventErr) {
       console.error(`[${id}] Error emitting failure event:`, eventErr);
     }
+
+    scheduleWorkflowCleanup(id);
   } finally {
     cleanupTaskAbortController(id);
 
@@ -2337,6 +2966,11 @@ async function executeTaskAsync(
       console.error(`[${id}] Error emitting idle event:`, eventErr);
     }
     
+    const finalTask = tasks.find(t => t.id === id);
+    if (finalTask && ['completed', 'failed', 'cancelled'].includes(finalTask.status)) {
+      scheduleWorkflowCleanup(id);
+    }
+
     saveData();
     
     console.log(`[${id}] ✓ Task finalization complete`);
@@ -2347,8 +2981,163 @@ async function executeTaskAsync(
 // TASK HISTORY & PERSISTENT MEMORY API
 // ============================================
 
+// Query tool call history (persisted)
+app.get("/api/tool-calls", async (req, res) => {
+  try {
+    const agentId = req.query.agentId ? String(req.query.agentId) : undefined;
+    const taskId = req.query.taskId ? String(req.query.taskId) : undefined;
+    const toolName = req.query.toolName ? String(req.query.toolName) : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const successRaw = req.query.success != null ? String(req.query.success) : undefined;
+    const success = successRaw != null ? ["1", "true", "yes"].includes(successRaw.toLowerCase()) : undefined;
+
+    const calls = usePostgres
+      ? await toolCallStore.getCallsAsync({ agentId, taskId, toolName, success, limit })
+      : toolCallStore.getCalls({ agentId, taskId, toolName, success, limit });
+    res.json({ calls, count: calls.length });
+  } catch (error) {
+    console.error("Error querying tool calls:", error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Query state changes (persisted)
+app.get("/api/state-changes", async (req, res) => {
+  try {
+    const agentId = req.query.agentId ? String(req.query.agentId) : undefined;
+    const taskId = req.query.taskId ? String(req.query.taskId) : undefined;
+    const eventType = req.query.eventType ? String(req.query.eventType) : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+
+    const events = usePostgres
+      ? await stateChangeStore.getEventsAsync({ agentId, taskId, eventType, limit })
+      : stateChangeStore.getEvents({ agentId, taskId, eventType, limit });
+    res.json({ events, count: events.length });
+  } catch (error) {
+    console.error("Error querying state changes:", error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Query audit events (persisted)
+app.get("/api/audit", async (req, res) => {
+  try {
+    const agentId = req.query.agentId ? String(req.query.agentId) : undefined;
+    const taskId = req.query.taskId ? String(req.query.taskId) : undefined;
+    const eventType = req.query.eventType ? String(req.query.eventType) : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+
+    const events = usePostgres
+      ? await auditStore.getEventsAsync({ agentId, taskId, eventType, limit })
+      : auditStore.getEvents({ agentId, taskId, eventType, limit });
+    res.json({ events, count: events.length });
+  } catch (error) {
+    console.error("Error querying audit events:", error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Query replay events for a task
+app.get("/api/replay/:taskId", async (req, res) => {
+  try {
+    const taskId = String(req.params.taskId || "").trim();
+    if (!taskId) {
+      return res.status(400).json({ error: "taskId is required" });
+    }
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const events = usePostgres
+      ? await replayStore.getEventsAsync({ taskId, limit })
+      : replayStore.getEvents({ taskId, limit });
+    res.json({ taskId, events, count: events.length });
+  } catch (error) {
+    console.error("Error querying replay events:", error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Replay a task using stored model/tool steps; fallback to retry if no data
+app.post("/api/replay/:taskId/run", async (req, res) => {
+  try {
+    const taskId = String(req.params.taskId || "").trim();
+    if (!taskId) {
+      return res.status(400).json({ error: "taskId is required" });
+    }
+
+    const events = usePostgres
+      ? await replayStore.getEventsAsync({ taskId })
+      : replayStore.getEvents({ taskId });
+    if (events.length > 0) {
+      const output = deriveReplayOutput(events);
+      auditLogger.log({
+        eventType: "task-event",
+        agentId: events[0]?.agentId ?? "unknown",
+        taskId,
+        details: { type: "task.replay", mode: "rehydrate", stepCount: events.length },
+      });
+
+      return res.json({
+        taskId,
+        mode: "rehydrate",
+        steps: events,
+        output,
+      });
+    }
+
+    const fallback = req.body?.fallback !== false;
+    if (!fallback) {
+      return res.status(404).json({ error: "No replay data available" });
+    }
+
+    const originalTask = await getTaskRecord(taskId);
+    if (!originalTask) {
+      return res.status(404).json({ error: "Original task not found" });
+    }
+
+    const retryTask = await createRetryRecord(taskId, req.body?.input);
+    if (!retryTask) {
+      return res.status(400).json({ error: "Failed to create retry" });
+    }
+
+    const response = await fetch(`http://localhost:${PORT}/task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: retryTask.input,
+        agent: originalTask.agent,
+      }),
+    });
+
+    if (!response.ok) {
+      return res.status(500).json({ error: "Failed to submit retry task" });
+    }
+
+    const result = await response.json();
+    const rekeyed = await rekeyTaskRecord(retryTask.id, result.taskId);
+    if (!rekeyed) {
+      return res.status(500).json({ error: "Failed to update retry task id" });
+    }
+
+    auditLogger.log({
+      eventType: "task-event",
+      agentId: originalTask.agent || "unknown",
+      taskId,
+      details: { type: "task.replay", mode: "retry", retryTaskId: result.taskId },
+    });
+
+    res.json({
+      taskId,
+      mode: "retry",
+      retryTaskId: result.taskId,
+      status: "queued",
+    });
+  } catch (error) {
+    console.error("Error replaying task:", error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // Get task history with filters
-app.get("/api/history", (req, res) => {
+app.get("/api/history", async (req, res) => {
   try {
     const filters: any = {};
     
@@ -2362,7 +3151,7 @@ app.get("/api/history", (req, res) => {
     if (req.query.sortBy) filters.sortBy = req.query.sortBy;
     if (req.query.sortOrder) filters.sortOrder = req.query.sortOrder;
     
-    const results = taskStore.query(filters);
+    const results = await queryTaskRecords(filters);
     res.json({ tasks: results, count: results.length });
   } catch (error) {
     console.error('Error querying task history:', error);
@@ -2371,9 +3160,9 @@ app.get("/api/history", (req, res) => {
 });
 
 // Get specific task with full details
-app.get("/api/history/:taskId", (req, res) => {
+app.get("/api/history/:taskId", async (req, res) => {
   try {
-    const task = taskStore.getTask(req.params.taskId);
+    const task = await getTaskRecord(req.params.taskId);
     if (!task) {
       return res.status(404).json({ error: 'Task not found' });
     }
@@ -2385,9 +3174,9 @@ app.get("/api/history/:taskId", (req, res) => {
 });
 
 // Get retry chain for a task
-app.get("/api/history/:taskId/retries", (req, res) => {
+app.get("/api/history/:taskId/retries", async (req, res) => {
   try {
-    const chain = taskStore.getRetryChain(req.params.taskId);
+    const chain = await getRetryChainRecords(req.params.taskId);
     res.json({ tasks: chain, count: chain.length });
   } catch (error) {
     console.error('Error getting retry chain:', error);
@@ -2398,13 +3187,13 @@ app.get("/api/history/:taskId/retries", (req, res) => {
 // Create a retry for a failed task
 app.post("/api/history/:taskId/retry", async (req, res) => {
   try {
-    const originalTask = taskStore.getTask(req.params.taskId);
+    const originalTask = await getTaskRecord(req.params.taskId);
     if (!originalTask) {
       return res.status(404).json({ error: 'Original task not found' });
     }
 
     // Create retry task in persistent store
-    const retryTask = taskStore.createRetry(req.params.taskId, req.body.input);
+    const retryTask = await createRetryRecord(req.params.taskId, req.body.input);
     if (!retryTask) {
       return res.status(400).json({ error: 'Failed to create retry' });
     }
@@ -2429,7 +3218,7 @@ app.post("/api/history/:taskId/retry", async (req, res) => {
     const result = await response.json();
     
     // Update the retry task ID with the actual submitted task ID
-    const rekeyed = taskStore.rekeyTask(retryTask.id, result.taskId);
+    const rekeyed = await rekeyTaskRecord(retryTask.id, result.taskId);
     if (!rekeyed) {
       return res.status(500).json({ error: 'Failed to update retry task id' });
     }
@@ -2446,9 +3235,9 @@ app.post("/api/history/:taskId/retry", async (req, res) => {
 });
 
 // Get statistics
-app.get("/api/history/stats", (_req, res) => {
+app.get("/api/history/stats", async (_req, res) => {
   try {
-    const stats = taskStore.getStats();
+    const stats = await getTaskStats();
     res.json(stats);
   } catch (error) {
     console.error('Error getting stats:', error);
@@ -2457,14 +3246,14 @@ app.get("/api/history/stats", (_req, res) => {
 });
 
 // Get per-agent stats (used by Explainability Panel)
-app.get("/api/history/agent/:agentId/stats", (req, res) => {
+app.get("/api/history/agent/:agentId/stats", async (req, res) => {
   try {
     const agentId = String(req.params.agentId || '').trim();
     if (!agentId) {
       return res.status(400).json({ error: 'agentId is required' });
     }
 
-    const tasks = taskStore.query({ agent: agentId });
+    const tasks = await queryTaskRecords({ agent: agentId });
     const completed = tasks.filter(t => t.status === 'completed').length;
     const failed = tasks.filter(t => t.status === 'failed').length;
     const cancelled = tasks.filter(t => t.status === 'cancelled').length;
@@ -2489,7 +3278,7 @@ app.get("/api/history/agent/:agentId/stats", (req, res) => {
 });
 
 // Agent Performance Metrics (Step 14)
-app.get('/api/metrics/agents', (req, res) => {
+app.get('/api/metrics/agents', async (req, res) => {
   try {
     const windowHoursRaw = Number(req.query.windowHours);
     const windowHours = Number.isFinite(windowHoursRaw) && windowHoursRaw > 0 ? windowHoursRaw : 24;
@@ -2518,9 +3307,10 @@ app.get('/api/metrics/agents', (req, res) => {
 
     const agentIds = agents.map(a => a.id);
 
-    const metrics = agentIds.map(agentId => {
+    const metrics = [] as Array<any>;
+    for (const agentId of agentIds) {
       const agentInfo = agents.find(a => a.id === agentId);
-      const recent = taskStore.query({ agent: agentId, startDate: since });
+      const recent = await queryTaskRecords({ agent: agentId, startDate: since });
 
       const completed = recent.filter(t => t.status === 'completed');
       const failed = recent.filter(t => t.status === 'failed');
@@ -2540,7 +3330,7 @@ app.get('/api/metrics/agents', (req, res) => {
       const estTokens = tokenSamples.reduce((sum, v) => sum + v, 0);
       const estCostUsd = Number(((estTokens / 1000) * COST_PER_1K_TOKENS_USD).toFixed(6));
 
-      return {
+      metrics.push({
         agentId,
         agentName: agentInfo?.name || agentId,
         windowHours,
@@ -2559,8 +3349,8 @@ app.get('/api/metrics/agents', (req, res) => {
           estimatedCostUsd: estCostUsd,
         },
         updatedAt: Date.now(),
-      };
-    });
+      });
+    }
 
     res.json({ windowHours, agents: metrics });
   } catch (error) {
@@ -2570,10 +3360,10 @@ app.get('/api/metrics/agents', (req, res) => {
 });
 
 // Delete old tasks (cleanup)
-app.delete("/api/history/cleanup", (req, res) => {
+app.delete("/api/history/cleanup", async (req, res) => {
   try {
     const daysOld = Number(req.query.days) || 30;
-    const deletedCount = taskStore.deleteOlderThan(daysOld);
+    const deletedCount = await deleteOldTasks(daysOld);
     res.json({ deletedCount, daysOld });
   } catch (error) {
     console.error('Error cleaning up old tasks:', error);
@@ -2582,9 +3372,9 @@ app.delete("/api/history/cleanup", (req, res) => {
 });
 
 // Delete all tasks (clear history)
-app.delete("/api/history", (_req, res) => {
+app.delete("/api/history", async (_req, res) => {
   try {
-    const deletedCount = taskStore.clearAll();
+    const deletedCount = await clearAllTasks();
     res.json({ deletedCount });
   } catch (error) {
     console.error('Error clearing history:', error);
@@ -2593,12 +3383,12 @@ app.delete("/api/history", (_req, res) => {
 });
 
 // Delete a specific task or all tasks in a conversation
-app.delete("/api/task/:id", (req, res) => {
+app.delete("/api/task/:id", async (req, res) => {
   try {
     const { id } = req.params;
     
     // Get the task to find its conversationId
-    const task = taskStore.getTask(id);
+    const task = await getTaskRecord(id);
     
     if (!task) {
       res.status(404).json({ error: 'Task not found' });
@@ -2608,10 +3398,10 @@ app.delete("/api/task/:id", (req, res) => {
     // If task has a conversationId, delete all tasks in that conversation
     let deletedCount = 0;
     if (task.conversationId) {
-      deletedCount = taskStore.deleteByConversationId(task.conversationId);
+      deletedCount = await deleteByConversation(task.conversationId);
     } else {
       // No conversationId, just delete this single task
-      const success = taskStore.deleteTask(id);
+      const success = await deleteTaskById(id);
       deletedCount = success ? 1 : 0;
     }
     
@@ -2626,10 +3416,14 @@ app.delete("/api/task/:id", (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  addLog("info", `Server listening on http://localhost:${PORT}`);
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
+if (!WORKER_ONLY) {
+  app.listen(PORT, () => {
+    addLog("info", `Server listening on http://localhost:${PORT}`);
+    console.log(`Server listening on http://localhost:${PORT}`);
+  });
+} else {
+  console.log("Worker-only mode enabled. HTTP server not started.");
+}
 
 function renderBaseShell(title: string, body: string): string {
   return (

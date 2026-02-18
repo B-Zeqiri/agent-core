@@ -123,7 +123,7 @@ export default function FailurePanel({ failure, taskInput, onRetry, onFix, onDis
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
-      className="bg-brand-panel border-2 border-brand-error rounded-lg shadow-2xl overflow-hidden"
+      className="bg-brand-panel border-2 border-brand-error rounded-lg shadow-2xl overflow-hidden flex flex-col max-h-[70vh]"
     >
       {/* Help Tip Banner */}
       <AnimatePresence>
@@ -197,7 +197,7 @@ export default function FailurePanel({ failure, taskInput, onRetry, onFix, onDis
       </div>
 
       {/* Error Details */}
-      <div className="p-4 space-y-4">
+      <div className="p-4 space-y-4 overflow-y-auto flex-1 min-h-0">
         {/* Original Task */}
         <div>
           <div className="text-xs text-brand-muted uppercase tracking-wide mb-2 flex items-center gap-2">

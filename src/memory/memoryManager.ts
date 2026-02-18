@@ -16,6 +16,14 @@
 
 import { AgentMemory, MemoryEntry, MemoryQuery } from "./agentMemory";
 import { VectorStore } from "./vectorStore";
+import { auditLogger } from "../security/auditLogger";
+import { memoryStore } from "../storage/memoryStore";
+import { resolvePersistenceFlag } from "../storage/persistenceConfig";
+
+export interface MemoryManagerOptions {
+  enableVectorSearch?: boolean;
+  enablePersistence?: boolean;
+}
 
 export interface MemoryACL {
   agentId: string;
@@ -28,9 +36,22 @@ export class MemoryManager {
   private acls = new Map<string, MemoryACL>();
   private vectorStore = new VectorStore();
   private enableVectorSearch = false;
+  private enablePersistence = false;
 
-  constructor(enableVectorSearch: boolean = false) {
-    this.enableVectorSearch = enableVectorSearch;
+  constructor(enableVectorSearchOrOptions: boolean | MemoryManagerOptions = false) {
+    if (typeof enableVectorSearchOrOptions === "boolean") {
+      this.enableVectorSearch = enableVectorSearchOrOptions;
+      this.enablePersistence = resolvePersistenceFlag(
+        process.env.PERSIST_MEMORY,
+        true
+      );
+    } else {
+      this.enableVectorSearch = Boolean(enableVectorSearchOrOptions.enableVectorSearch);
+      this.enablePersistence =
+        typeof enableVectorSearchOrOptions.enablePersistence === "boolean"
+          ? enableVectorSearchOrOptions.enablePersistence
+          : resolvePersistenceFlag(process.env.PERSIST_MEMORY, true);
+    }
   }
 
   // ============ MEMORY CREATION & MANAGEMENT ============
@@ -45,6 +66,13 @@ export class MemoryManager {
 
     const memory = new AgentMemory(agentId, maxShortTermSize);
     this.agentMemories.set(agentId, memory);
+
+    if (this.enablePersistence) {
+      const loaded = memoryStore.loadAgentMemory(agentId, memory.getMaxShortTermSize());
+      if (loaded.shortTerm.length > 0 || loaded.longTerm.length > 0) {
+        memory.import({ shortTerm: loaded.shortTerm, longTerm: loaded.longTerm });
+      }
+    }
 
     // Initialize ACL (can only access own memory by default)
     this.acls.set(agentId, {
@@ -67,6 +95,10 @@ export class MemoryManager {
    * Delete agent's memory
    */
   deleteAgentMemory(agentId: string): boolean {
+    if (this.enablePersistence) {
+      memoryStore.deleteAgentMemory(agentId);
+    }
+
     return this.agentMemories.delete(agentId) && this.acls.delete(agentId);
   }
 
@@ -162,6 +194,21 @@ export class MemoryManager {
     }
 
     const entryId = memory.rememberShort(content, type, metadata);
+    const entry = memory.getEntry(entryId);
+
+    if (this.enablePersistence && entry) {
+      memoryStore.saveEntry(targetAgentId, entry, false);
+    }
+
+    auditLogger.log({
+      eventType: "memory-write",
+      agentId,
+      details: {
+        targetAgentId,
+        entryId,
+        type,
+      },
+    });
 
     // Optional: index in vector store
     if (this.enableVectorSearch) {
@@ -197,6 +244,22 @@ export class MemoryManager {
     }
 
     const entryId = memory.rememberLong(content, type, metadata);
+    const entry = memory.getEntry(entryId);
+
+    if (this.enablePersistence && entry) {
+      memoryStore.saveEntry(targetAgentId, entry, true);
+    }
+
+    auditLogger.log({
+      eventType: "memory-write",
+      agentId,
+      details: {
+        targetAgentId,
+        entryId,
+        type,
+        pinnedLong: true,
+      },
+    });
 
     // Optional: index in vector store
     if (this.enableVectorSearch) {
@@ -231,7 +294,20 @@ export class MemoryManager {
       throw new Error(`No memory found for agent ${targetAgentId}`);
     }
 
-    return memory.queryAll(query);
+    const entries = memory.queryAll(query);
+
+    auditLogger.log({
+      eventType: "memory-read",
+      agentId,
+      details: {
+        targetAgentId,
+        query,
+        entryIds: entries.map((entry) => entry.id),
+        count: entries.length,
+      },
+    });
+
+    return entries;
   }
 
   /**
@@ -247,7 +323,19 @@ export class MemoryManager {
       return "";
     }
 
-    return memory.getContext(limit);
+    const context = memory.getContext(limit);
+
+    auditLogger.log({
+      eventType: "memory-read",
+      agentId,
+      details: {
+        targetAgentId,
+        limit,
+        contextLength: context.length,
+      },
+    });
+
+    return context;
   }
 
   /**

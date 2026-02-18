@@ -134,6 +134,9 @@ Keep responses clear, structured, and actionable.`;
           const result = await modelAdapter.call(systemPrompt, userMessage, {
             ...parsed.overrides,
             signal: ctx?.signal,
+            taskId: ctx?.taskId,
+            agentId: this.agentId,
+            agentVersion: this.agent.metadata?.version as string | undefined,
           });
           return JSON.stringify({
             ok: true,

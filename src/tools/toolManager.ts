@@ -14,7 +14,9 @@
 import { BaseTool, ToolConfig, ToolPermission, ToolCall, ToolResult } from "./tool.interface";
 import { securityManager } from "../security/securityManager";
 import { auditLogger } from "../security/auditLogger";
+import { replayStore } from "../storage/replayStore";
 import { eventBus } from "../events/eventBus";
+import { toolCallStore } from "../storage/toolCallStore";
 
 export interface AgentToolPermissions {
   agentId: string;
@@ -153,8 +155,9 @@ export class ToolManager {
       auditLogger.log({
         eventType: 'permission-denied',
         agentId,
+        taskId,
         toolName: toolCall.toolName,
-        details: { reason: 'Agent lacks permission' },
+        details: { reason: 'Agent lacks permission', args: toolCall.args },
       });
       return {
         success: false,
@@ -177,8 +180,9 @@ export class ToolManager {
       auditLogger.log({
         eventType: 'rate-limit-exceeded',
         agentId,
+        taskId,
         toolName: toolCall.toolName,
-        details: { rateLimit: tool.getConfig().rateLimit },
+        details: { rateLimit: tool.getConfig().rateLimit, args: toolCall.args },
       });
       return {
         success: false,
@@ -201,9 +205,42 @@ export class ToolManager {
       auditLogger.log({
         eventType: 'tool-call',
         agentId,
+        taskId,
         toolName: toolCall.toolName,
-        details: { executionTime, success: true },
+        details: { executionTime, success: true, args: toolCall.args },
       });
+
+      if (taskId) {
+        replayStore.recordEvent({
+          taskId,
+          agentId,
+          kind: "tool",
+          name: toolCall.toolName,
+          input: toolCall.args,
+          output: result,
+          startedAt: startTime,
+          completedAt: Date.now(),
+          metadata: { success: true },
+        });
+      }
+
+      toolCallStore.recordCall({
+        timestamp: startTime,
+        agentId,
+        taskId,
+        toolName: toolCall.toolName,
+        args: toolCall.args,
+        success: true,
+        durationMs: executionTime,
+      });
+
+      if (taskId) {
+        eventBus.emit("tool.completed", taskId, agentId, {
+          toolName: toolCall.toolName,
+          success: true,
+          executionTime,
+        }).catch(() => {});
+      }
 
       return {
         success: true,
@@ -219,9 +256,44 @@ export class ToolManager {
       auditLogger.log({
         eventType: isTimeout ? 'tool-timeout' : 'execution-error',
         agentId,
+        taskId,
         toolName: toolCall.toolName,
-        details: { executionTime, error },
+        details: { executionTime, error, args: toolCall.args },
       });
+
+      if (taskId) {
+        replayStore.recordEvent({
+          taskId,
+          agentId,
+          kind: "tool",
+          name: toolCall.toolName,
+          input: toolCall.args,
+          error,
+          startedAt: startTime,
+          completedAt: Date.now(),
+          metadata: { success: false },
+        });
+      }
+
+      toolCallStore.recordCall({
+        timestamp: startTime,
+        agentId,
+        taskId,
+        toolName: toolCall.toolName,
+        args: toolCall.args,
+        success: false,
+        durationMs: executionTime,
+        error,
+      });
+
+      if (taskId) {
+        eventBus.emit("tool.completed", taskId, agentId, {
+          toolName: toolCall.toolName,
+          success: false,
+          executionTime,
+          error,
+        }).catch(() => {});
+      }
 
       return {
         success: false,

@@ -130,6 +130,7 @@ export function TaskHistory() {
         const needsAgents = backendTasks
           .filter(
             (task) =>
+              task.multiAgentEnabled === true &&
               (task.status === 'pending' || task.status === 'in_progress' || task.status === 'running') &&
               (!task.involvedAgents || task.involvedAgents.length < 2)
           )
@@ -527,7 +528,7 @@ export function TaskHistory() {
                             {displayTask.agent}
                           </span>
 
-                          {(displayTask.multiAgentEnabled || (displayTask.involvedAgents && displayTask.involvedAgents.length > 1)) && (
+                          {displayTask.multiAgentEnabled && (
                             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold tracking-wide bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-rose-500/15 border border-amber-400/40 text-amber-200 shadow-sm shadow-amber-500/20">
                               <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
                               {displayTask.involvedAgents && displayTask.involvedAgents.length > 1

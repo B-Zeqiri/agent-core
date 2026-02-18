@@ -3,16 +3,20 @@
  */
 
 import { TaskStore } from './taskStore';
+import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const testDbPath = path.join(__dirname, '../../data/test-tasks.json');
+const testDbPath = path.join(__dirname, '../../data/test-tasks.db');
 
 // Clean up test file
 function cleanup() {
-  if (fs.existsSync(testDbPath)) {
-    fs.unlinkSync(testDbPath);
-  }
+  const paths = [testDbPath, `${testDbPath}-wal`, `${testDbPath}-shm`];
+  paths.forEach((p) => {
+    if (fs.existsSync(p)) {
+      fs.unlinkSync(p);
+    }
+  });
 }
 
 console.log('🧪 Testing TaskStore...\n');
@@ -20,7 +24,8 @@ console.log('🧪 Testing TaskStore...\n');
 // Test 1: Create and retrieve task
 console.log('Test 1: Create and retrieve task');
 cleanup();
-const store = new TaskStore(testDbPath);
+const db = new Database(testDbPath);
+const store = new TaskStore({ db });
 const task1 = store.createTask('Build a todo app', {
   agent: 'web-dev-agent',
   agentSelectionReason: 'Web development keywords detected',
@@ -112,7 +117,9 @@ console.log('');
 // Test 8: Persistence
 console.log('Test 8: Persistence (save and reload)');
 store.flush(); // Force save
-const store2 = new TaskStore(testDbPath);
+db.close();
+const db2 = new Database(testDbPath);
+const store2 = new TaskStore({ db: db2 });
 const reloaded = store2.getTask(task1.id);
 console.log('✓ Data persisted and reloaded');
 console.assert(reloaded?.input === 'Build a todo app', 'Should reload correctly');
@@ -120,7 +127,7 @@ console.log('');
 
 // Test 9: Agent decision tracking
 console.log('Test 9: Agent decision tracking');
-const taskWithDecision = store.createTask('Create API endpoint', {
+const taskWithDecision = store2.createTask('Create API endpoint', {
   agent: 'web-dev-agent',
   agentSelectionReason: 'Keywords: API, endpoint. Web development task detected.',
   availableAgents: ['web-dev-agent', 'research-agent', 'system-agent'],
@@ -139,35 +146,35 @@ console.log('');
 
 // Test 10: Cleanup old tasks
 console.log('Test 10: Cleanup old tasks');
-const oldTask = store.createTask('Old task', {
+const oldTask = store2.createTask('Old task', {
   agent: 'research-agent',
   startedAt: Date.now() - (40 * 24 * 60 * 60 * 1000), // 40 days ago
 });
-const deletedCount = store.deleteOlderThan(30);
+const deletedCount = store2.deleteOlderThan(30);
 console.log('✓ Old tasks deleted');
 console.log(`  Deleted ${deletedCount} task(s) older than 30 days`);
 console.log('');
 
 // Test 11: Rekey retry task
 console.log('Test 11: Rekey retry task');
-const task4 = store.createTask('Retry rekey', {
+const task4 = store2.createTask('Retry rekey', {
   agent: 'web-dev-agent',
   status: 'failed',
 });
-store.updateTask(task4.id, { status: 'failed' });
-const retry2 = store.createRetry(task4.id);
+store2.updateTask(task4.id, { status: 'failed' });
+const retry2 = store2.createRetry(task4.id);
 const newRetryId = `rekey-${retry2?.id}`;
-const rekeyed = retry2 ? store.rekeyTask(retry2.id, newRetryId) : null;
+const rekeyed = retry2 ? store2.rekeyTask(retry2.id, newRetryId) : null;
 console.log('✓ Retry rekeyed:', rekeyed?.id);
 console.assert(rekeyed?.id === newRetryId, 'Rekey should update id');
-console.assert(store.getTask(newRetryId)?.id === newRetryId, 'New id should be retrievable');
-console.assert(store.getTask(retry2?.id || '') === null, 'Old id should not exist');
-const originalAfterRekey = store.getTask(task4.id);
+console.assert(store2.getTask(newRetryId)?.id === newRetryId, 'New id should be retrievable');
+console.assert(store2.getTask(retry2?.id || '') === null, 'Old id should not exist');
+const originalAfterRekey = store2.getTask(task4.id);
 console.assert(
   originalAfterRekey?.retries?.includes(newRetryId),
   'Original task should reference new retry id'
 );
-const rekeyChain = store.getRetryChain(task4.id);
+const rekeyChain = store2.getRetryChain(task4.id);
 console.assert(
   rekeyChain.some((t) => t.id === newRetryId),
   'Retry chain should include rekeyed id'
@@ -177,5 +184,6 @@ console.log('');
 console.log('✅ All tests passed!\n');
 
 // Cleanup
+db2.close();
 cleanup();
 console.log('🧹 Cleaned up test files');

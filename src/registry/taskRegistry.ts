@@ -30,7 +30,7 @@ export class TaskRegistry {
     maxInputLength: 10000,
     allowedAgentTypes: ['web-dev', 'research', 'system'],
     defaultTimeout: 60000,
-    maxTimeout: 600000,
+    maxTimeout: 3600000,
   };
 
   /**

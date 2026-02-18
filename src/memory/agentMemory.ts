@@ -134,6 +134,13 @@ export class AgentMemory {
   }
 
   /**
+   * Get configured short-term size limit
+   */
+  getMaxShortTermSize(): number {
+    return this.maxShortTermSize;
+  }
+
+  /**
    * Clear short-term memory (flush session)
    */
   clearShortTerm(): void {

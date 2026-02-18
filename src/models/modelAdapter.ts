@@ -4,6 +4,9 @@
  * Abstracts different model providers (gpt4all, OpenAI, etc.)
  */
 
+import { auditLogger } from "../security/auditLogger";
+import { replayStore } from "../storage/replayStore";
+
 export interface ModelResponse {
   content: string;
   model: string;
@@ -25,6 +28,70 @@ export abstract class ModelAdapter {
     userMessage: string,
     overrides?: import('./generation').ModelCallOverrides
   ): Promise<ModelResponse>;
+}
+
+function recordModelAudit(
+  overrides: import("./generation").ModelCallOverrides | undefined,
+  details: {
+    model: string;
+    executionTimeMs: number;
+    temperature?: number;
+    maxTokens?: number;
+    seed?: number;
+    promptLength: number;
+    userMessageLength: number;
+    success: boolean;
+    error?: string;
+  }
+): void {
+  if (!overrides?.taskId && !overrides?.agentId) return;
+
+  auditLogger.log({
+    eventType: "model-call",
+    agentId: overrides?.agentId ?? "unknown",
+    taskId: overrides?.taskId,
+    details: {
+      ...details,
+      agentVersion: overrides?.agentVersion,
+    },
+  });
+}
+
+function recordModelReplay(
+  overrides: import("./generation").ModelCallOverrides | undefined,
+  payload: {
+    model: string;
+    systemPrompt: string;
+    userMessage: string;
+    temperature?: number;
+    maxTokens?: number;
+    seed?: number;
+    output?: string;
+    error?: string;
+    startedAt: number;
+    completedAt: number;
+  }
+): void {
+  if (!overrides?.taskId || !overrides?.agentId) return;
+
+  replayStore.recordEvent({
+    taskId: overrides.taskId,
+    agentId: overrides.agentId,
+    kind: "model",
+    name: payload.model,
+    input: {
+      systemPrompt: payload.systemPrompt,
+      userMessage: payload.userMessage,
+      temperature: payload.temperature,
+      maxTokens: payload.maxTokens,
+      seed: payload.seed,
+    },
+    output: payload.output ?? null,
+    error: payload.error,
+    startedAt: payload.startedAt,
+    completedAt: payload.completedAt,
+    metadata: { agentVersion: overrides.agentVersion },
+  });
 }
 
 function isAbortLikeError(err: unknown, signal?: AbortSignal): boolean {
@@ -70,6 +137,9 @@ export class GPT4AllAdapter extends ModelAdapter {
     userMessage: string,
     overrides?: import('./generation').ModelCallOverrides
   ): Promise<ModelResponse> {
+    const startTime = Date.now();
+    const usedTemperature = overrides?.temperature ?? this.config.temperature;
+    const usedMaxTokens = overrides?.maxTokens ?? this.config.maxTokens;
     try {
       const { OpenAI } = await import("openai");
       const client = new OpenAI({
@@ -77,15 +147,14 @@ export class GPT4AllAdapter extends ModelAdapter {
         apiKey: this.config.apiKey,
       });
 
-      const startTime = Date.now();
       const payload: ChatCompletionCreateParamsNonStreaming = {
         model: this.config.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage },
         ],
-        temperature: overrides?.temperature ?? this.config.temperature,
-        max_tokens: overrides?.maxTokens ?? this.config.maxTokens,
+        temperature: usedTemperature,
+        max_tokens: usedMaxTokens,
       };
 
       const response = overrides?.signal
@@ -95,12 +164,61 @@ export class GPT4AllAdapter extends ModelAdapter {
       const executionTimeMs = Date.now() - startTime;
       const content = response.choices[0]?.message?.content || "No response generated";
 
+      recordModelAudit(overrides, {
+        model: this.config.model,
+        executionTimeMs,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        promptLength: systemPrompt.length,
+        userMessageLength: userMessage.length,
+        success: true,
+      });
+
+      recordModelReplay(overrides, {
+        model: this.config.model,
+        systemPrompt,
+        userMessage,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        output: content,
+        startedAt: startTime,
+        completedAt: Date.now(),
+      });
+
       return {
         content,
         model: this.config.model,
         executionTimeMs,
       };
     } catch (error) {
+      const executionTimeMs = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      recordModelAudit(overrides, {
+        model: this.config.model,
+        executionTimeMs,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        promptLength: systemPrompt.length,
+        userMessageLength: userMessage.length,
+        success: false,
+        error: errorMessage,
+      });
+
+      recordModelReplay(overrides, {
+        model: this.config.model,
+        systemPrompt,
+        userMessage,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        error: errorMessage,
+        startedAt: startTime,
+        completedAt: Date.now(),
+      });
+
       const message = error instanceof Error ? error.message : String(error);
       // Graceful fallback to OpenAI if local endpoint is unreachable
       const isConnectionError = /fetch|network|connect|ECONN|ENOTFOUND|timeout/i.test(message);
@@ -156,21 +274,23 @@ export class OpenAIAdapter extends ModelAdapter {
     userMessage: string,
     overrides?: import('./generation').ModelCallOverrides
   ): Promise<ModelResponse> {
+    const startTime = Date.now();
+    const usedTemperature = overrides?.temperature ?? this.config.temperature;
+    const usedMaxTokens = overrides?.maxTokens ?? this.config.maxTokens;
     try {
       const { OpenAI } = await import("openai");
       const client = new OpenAI({
         apiKey: this.config.apiKey,
       });
 
-      const startTime = Date.now();
       const payload: ChatCompletionCreateParamsNonStreaming = {
         model: this.config.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage },
         ],
-        temperature: overrides?.temperature ?? this.config.temperature,
-        max_tokens: overrides?.maxTokens ?? this.config.maxTokens,
+        temperature: usedTemperature,
+        max_tokens: usedMaxTokens,
         ...(overrides?.seed != null ? { seed: overrides.seed } : {}),
       };
 
@@ -181,12 +301,61 @@ export class OpenAIAdapter extends ModelAdapter {
       const executionTimeMs = Date.now() - startTime;
       const content = response.choices[0]?.message?.content || "No response generated";
 
+      recordModelAudit(overrides, {
+        model: this.config.model,
+        executionTimeMs,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        promptLength: systemPrompt.length,
+        userMessageLength: userMessage.length,
+        success: true,
+      });
+
+      recordModelReplay(overrides, {
+        model: this.config.model,
+        systemPrompt,
+        userMessage,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        output: content,
+        startedAt: startTime,
+        completedAt: Date.now(),
+      });
+
       return {
         content,
         model: this.config.model,
         executionTimeMs,
       };
     } catch (error) {
+      const executionTimeMs = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      recordModelAudit(overrides, {
+        model: this.config.model,
+        executionTimeMs,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        promptLength: systemPrompt.length,
+        userMessageLength: userMessage.length,
+        success: false,
+        error: errorMessage,
+      });
+
+      recordModelReplay(overrides, {
+        model: this.config.model,
+        systemPrompt,
+        userMessage,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        error: errorMessage,
+        startedAt: startTime,
+        completedAt: Date.now(),
+      });
+
       throw new Error(
         `OpenAI adapter error: ${error instanceof Error ? error.message : String(error)}`
       );
@@ -217,6 +386,8 @@ export class OllamaAdapter extends ModelAdapter {
     overrides?: import('./generation').ModelCallOverrides
   ): Promise<ModelResponse> {
     const startTime = Date.now();
+    const usedTemperature = overrides?.temperature ?? this.config.temperature;
+    const usedMaxTokens = overrides?.maxTokens ?? this.config.maxTokens;
 
     try {
       const base = (this.config.baseURL || '').replace(/\/+$/, '');
@@ -236,8 +407,8 @@ export class OllamaAdapter extends ModelAdapter {
             { role: 'user', content: userMessage },
           ],
           options: {
-            temperature: overrides?.temperature ?? this.config.temperature,
-            num_predict: overrides?.maxTokens ?? this.config.maxTokens,
+            temperature: usedTemperature,
+            num_predict: usedMaxTokens,
           },
         }),
       });
@@ -250,6 +421,29 @@ export class OllamaAdapter extends ModelAdapter {
       const content = data?.message?.content || '';
       const executionTimeMs = Date.now() - startTime;
 
+      recordModelAudit(overrides, {
+        model: this.config.model,
+        executionTimeMs,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        promptLength: systemPrompt.length,
+        userMessageLength: userMessage.length,
+        success: true,
+      });
+
+      recordModelReplay(overrides, {
+        model: this.config.model,
+        systemPrompt,
+        userMessage,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        output: content,
+        startedAt: startTime,
+        completedAt: Date.now(),
+      });
+
       return {
         content,
         model: this.config.model,
@@ -259,6 +453,33 @@ export class OllamaAdapter extends ModelAdapter {
       if (isAbortLikeError(error, overrides?.signal)) {
         throw error;
       }
+      const executionTimeMs = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      recordModelAudit(overrides, {
+        model: this.config.model,
+        executionTimeMs,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        promptLength: systemPrompt.length,
+        userMessageLength: userMessage.length,
+        success: false,
+        error: errorMessage,
+      });
+
+      recordModelReplay(overrides, {
+        model: this.config.model,
+        systemPrompt,
+        userMessage,
+        temperature: usedTemperature,
+        maxTokens: usedMaxTokens,
+        seed: overrides?.seed,
+        error: errorMessage,
+        startedAt: startTime,
+        completedAt: Date.now(),
+      });
+
       throw new Error(`Ollama adapter error: ${error instanceof Error ? error.message : String(error)}`);
     }
   }

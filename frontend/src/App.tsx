@@ -49,6 +49,12 @@ function App() {
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const [activeAgents, setActiveAgents] = useState<string[]>([]);
 
+  const isTaskActive =
+    currentTask?.status === 'pending' ||
+    currentTask?.status === 'queued' ||
+    currentTask?.status === 'in_progress';
+  const sidebarActiveAgent = isTaskActive ? currentTask?.agent : undefined;
+
   // Check if we're in test mode via URL parameter
   const isTestMode = new URLSearchParams(window.location.search).get('test') === 'failure';
 
@@ -64,7 +70,7 @@ function App() {
       <div className="flex flex-1 overflow-hidden">
         <div className="w-64 flex-shrink-0 flex flex-col gap-3 p-3">
           <SchedulerPanel />
-          <AgentSidebar activeAgent={currentTask?.agent} activeAgents={activeAgents} />
+          <AgentSidebar activeAgent={sidebarActiveAgent} activeAgents={activeAgents} />
         </div>
         <MainWorkspace
           uiState={uiState}
